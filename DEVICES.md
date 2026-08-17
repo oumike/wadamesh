@@ -27,8 +27,12 @@ USB) and the [GitHub releases](https://github.com/ALLFATHER-BV/wadamesh/releases
   microSD for all persistent data. Ships through the Tanmatsu launcher store,
   updates arrive as store updates.
 - **ThinkNode M9**: keyboard plus d-pad navigation (no touch), same feature set
-  as the other boards where the hardware allows. New in beta_38; expect rough
-  edges and report them.
+  as the other boards where the hardware allows. Shares the T-LoRa Pager's
+  no-touch keyboard shortcuts — M/C/H/A/S jump to the five main tabs, Q/E nudge
+  a focused slider, W/A/X/D pan the Map tab, Backspace jumps to the first
+  unread message in a chat — alongside its own dedicated Message/Home/Map/Back
+  keys; see [TLORA_PAGER_SHORTCUTS.md](TLORA_PAGER_SHORTCUTS.md) for what each
+  one does. New in beta_38; expect rough edges and report them.
 - **RAK WisMesh Tap V2**: newest port, touch-driven. The browser-flash path is
   fresh; if the flasher cannot open the serial port, put the board in download
   mode manually and retry, and please report it.

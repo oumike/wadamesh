@@ -1558,6 +1558,10 @@ constexpr int TAB_LAST               = 4;
 // press already looks like on every board.
 #define NAV_ACCENTFOCUS_FLAG LV_OBJ_FLAG_USER_3
 
+// A colour swatch must keep its own fill while keyboard-focused; replacing it
+// with the normal reverse-video fill hides the colour the user is choosing.
+#define NAV_COLOR_SWATCH_FLAG LV_OBJ_FLAG_USER_4
+
 // ---- Chat overlay layout ----
 constexpr int CHAT_HDR_H       = 0;    // in-chat header bar removed; thread name shows in the status bar
 #if CAP_LARGE_SCREEN
@@ -3530,6 +3534,16 @@ static void navFocusCb(lv_group_t* g) {
     s_nav_sv.bg_c = s_nav_sv.bg_o = s_nav_sv.txt = false;   // nothing to restore; navUnstyle just clears these
     lv_obj_set_style_bg_color(f, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(f, LV_OPA_20, LV_PART_MAIN);
+  } else if (lv_obj_has_flag(f, NAV_COLOR_SWATCH_FLAG)) {
+    // Preserve the swatch fill and frame it instead. Save the local colour
+    // properties so navUnstyle restores them rather than removing the swatch.
+    s_nav_sv.bg_c = lv_obj_get_local_style_prop(f, LV_STYLE_BG_COLOR,   &s_nav_sv.v_bg_c, LV_PART_MAIN) == LV_STYLE_RES_FOUND;
+    s_nav_sv.bg_o = lv_obj_get_local_style_prop(f, LV_STYLE_BG_OPA,     &s_nav_sv.v_bg_o, LV_PART_MAIN) == LV_STYLE_RES_FOUND;
+    s_nav_sv.txt  = lv_obj_get_local_style_prop(f, LV_STYLE_TEXT_COLOR, &s_nav_sv.v_txt,  LV_PART_MAIN) == LV_STYLE_RES_FOUND;
+    lv_obj_set_style_outline_color(f, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+    lv_obj_set_style_outline_width(f, 3, LV_PART_MAIN);
+    lv_obj_set_style_outline_pad(f, 2, LV_PART_MAIN);
+    lv_obj_set_style_outline_opa(f, LV_OPA_COVER, LV_PART_MAIN);
   } else {
     // Save the element's current local props, then apply the negative fill.
     s_nav_sv.bg_c = lv_obj_get_local_style_prop(f, LV_STYLE_BG_COLOR,   &s_nav_sv.v_bg_c, LV_PART_MAIN) == LV_STYLE_RES_FOUND;
@@ -3740,10 +3754,13 @@ static void navRefocusFirstVisible(lv_obj_t* p) {
 }
 // Small key hints over each menubar icon — shown only while keyboard nav is on.
 static void navMenubarKeysSync() {
-#if defined(HAS_TANMATSU) || defined(TLORA_PAGER)
+#if defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
   // Tanmatsu menubar uses the coloured F-key shapes, not letter hotkeys. The
-  // pager prints each fixed mnemonic beside its icon directly in the tab label,
-  // so neither target needs this optional overlay. A plain `return` isn't enough
+  // pager and the M9 print each fixed mnemonic beside its icon directly in the
+  // tab label, so none of these targets needs this optional overlay — and on the
+  // M9 it would actively mislead, since the letters it draws are the PROGRAMMABLE
+  // tab hotkeys (default E/R/T/U/I), which that board never dispatches (its
+  // `#if CAP_TRACKBALL` nav block is compiled out). A plain `return` isn't enough
   // since the body below still needs s_kbd_nav to exist at compile time; exclude it.
 #else
   if (!g_lv.tabview) return;
@@ -4727,6 +4744,9 @@ static void refreshChatList(LvChatPanel& p);
 static void applyAccent(uint32_t rgb);            // theme accent (Settings -> Theme colour)
 static void openAccentPicker();
 static void openAccentPickerCb(lv_event_t* e);
+#if defined(HAS_M9_KEYBOARD)
+static bool m9AccentPickerMove(int key);
+#endif
 static void openChannelScopeModal(int slot, const char* name);  // per-channel region scope
 static void channelGearCb(lv_event_t* e);
 static bool chanScopeIsOpen();   // fwd: the status-bar back chevron closes the channel-settings sheet
@@ -28862,9 +28882,9 @@ static void mapCanvasEventCb(lv_event_t* e) {
   refreshMapInfoLabel();
 }
 
-#if defined(HAS_TANMATSU) || defined(TLORA_PAGER)
-// Keyboard pan (Ctrl+Arrow on Tanmatsu / WAXD on the pager, both on the Map
-// tab). Mirrors the drag-release math in mapCanvasEventCb: synthesize a pixel
+#if defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+// Keyboard pan (Ctrl+Arrow on Tanmatsu / WAXD on the pager and the M9, all on
+// the Map tab). Mirrors the drag-release math in mapCanvasEventCb: synthesize a pixel
 // delta of ~1/4 the visible span in the arrow direction, convert it through
 // the same world-px ↔ lat/lon helpers (so the lon step automatically scales
 // with the current zoom's degrees-per-pixel) and re-render. dir: 0=up(north,
@@ -28891,7 +28911,7 @@ static void mapNudge(int dir) {
   renderMapMarkers();
   refreshMapInfoLabel();
 }
-#endif  // HAS_TANMATSU || TLORA_PAGER (mapNudge)
+#endif  // HAS_TANMATSU || TLORA_PAGER || HAS_THINKNODE_M9 (mapNudge)
 
 // ----- Zoom + recenter -----
 //
@@ -31830,7 +31850,7 @@ static void chatVirtFreeOffsets() {
   if (s_chat_virt.day_sep_y) { heap_caps_free(s_chat_virt.day_sep_y); s_chat_virt.day_sep_y = nullptr; }
 }
 
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
 // Encoder-nav focus survival across the virtualized re-render. The render
 // deletes and recreates every bubble row, so a row pointer cannot preserve
 // focus across the rebuild. The pending logical index below is the message the
@@ -31842,6 +31862,12 @@ static void chatVirtFreeOffsets() {
 // stepped focus out from the transiently wrong focus position before the load
 // landed. -1 = idle. The timestamp expires a stale pending target (see the
 // clamp) so a render that never fires can't wedge encoder nav.
+//
+// The M9 has no encoder, but its Backspace "jump to the first unread message"
+// shortcut needs exactly the same re-aim: that jump also scrolls the list and
+// then wants focus to land on a row the render is about to recreate. Only the
+// pager SETS this from an edge detent; on the M9 it is set once per Backspace
+// press and consumed by the same render below.
 static int      s_pager_chat_focus_i  = -1;
 static uint32_t s_pager_chat_focus_ms = 0;
 #endif
@@ -31849,7 +31875,7 @@ static uint32_t s_pager_chat_focus_ms = 0;
 static void chatVirtReset(LvChatPanel* p) {
   chatVirtCancelRenderTimer();
   (void)p;
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
   s_pager_chat_focus_i = -1;
 #endif
   // Null the divider pointer WITHOUT queueing a delete. It is always a child of
@@ -33086,8 +33112,9 @@ static void chatVirtRenderWindow(LvChatPanel* p, lv_coord_t scroll_y, lv_coord_t
   // Rows are recreated, so remember them by logical index; header/composer
   // controls survive the rebuild and can be retained by pointer.
   int refocus_i = -1;
-#if defined(TLORA_PAGER)
-  // An explicit pending target from the Pager encoder edge clamp wins.
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+  // An explicit pending target wins: the Pager encoder edge clamp, or the M9's
+  // Backspace jump to the first unread message.
   refocus_i = s_pager_chat_focus_i;
 #endif
   lv_obj_t* stable_focus = nullptr;
@@ -33147,7 +33174,7 @@ static void chatVirtRenderWindow(LvChatPanel* p, lv_coord_t scroll_y, lv_coord_t
         break;
       }
     }
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
     s_pager_chat_focus_i = -1;   // consumed (whether or not the row was found)
 #endif
   } else if (stable_focus && lv_obj_is_valid(stable_focus)) {
@@ -35356,10 +35383,13 @@ static bool isDismissKey(int key) {
 
 // Bottom-tab a key jumps to (no popup, no field focused), or -1.
 static int tabForKey(int key) {
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
   // Pager mnemonic keys are only a bottom-bar shortcut at the top level. In
   // an open chat, settings detail, app page, or popup they remain inert so a
-  // letter cannot unexpectedly abandon the inner screen.
+  // letter cannot unexpectedly abandon the inner screen. The M9 shares them:
+  // it has no touch either, and its dedicated hardware keys only cover
+  // Message / Home / Map — Contacts and Settings have no button at all, so
+  // without these the only way there is walking the tab bar with the d-pad.
   if (!navOnMainPage()) return -1;
   switch (key) {
     case 'm': case 'M': return CHAT_INBOX_TAB_INDEX;
@@ -36662,6 +36692,21 @@ static bool m9HandleNavKey(int key) {
 #if defined(HAS_M9_KEYBOARD)
 static bool m9HandleArrowKey(int key, lv_obj_t* ta) {
   if (!s_kbd_nav) return false;
+  if (m9AccentPickerMove(key)) {
+    s_nav_show = true; if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+  if (navOpenDropdown()) {
+    switch (key) {
+      case M9_KEY_UP:   navPushTap(LV_KEY_UP);   break;
+      case M9_KEY_DOWN: navPushTap(LV_KEY_DOWN); break;
+      case M9_KEY_LEFT:
+      case M9_KEY_RIGHT:                            break;
+      default: return false;
+    }
+    s_nav_show = true; if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
   switch (key) {
     case M9_KEY_UP:
       navMoveDir(NAV_UP);
@@ -36807,9 +36852,31 @@ if (g_lv.task && g_lv.task->isManualLock()) {
       if (g_lv.task) g_lv.task->noteUserInput();
       return;
     }
+#endif  // TLORA_PAGER (Enter; the M9 has its own in m9HandleNavKey)
+    // ---- No-touch keyboard shortcuts, shared by the Pager and the M9 --------
+    // Both boards have no touchscreen, so the things a finger would do (tap a
+    // bottom-bar tab, drag a slider knob, drag the map) need a key each. The
+    // M9 inherits the pager's set unchanged so the two keyboards are learned
+    // once; its dedicated hardware keys (Message / Home / Map / Back) stay as
+    // they are and simply overlap three of the mnemonics.
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_THINKNODE_M9)
+    // The pager only ever reaches this branch with no field holding nav focus
+    // (its `ta` is derived from the nav-group focus itself), so its letter
+    // shortcuts can never eat typing. On the M9 `ta` is null whenever edit mode
+    // is off — INCLUDING while a field is merely focused — so that same
+    // protection has to be spelled out here, or 'm' on a focused composer would
+    // tab-jump instead of waiting to be typed. The setup wizard is excluded for
+    // the same reason it is in m9HandleNavKey: it is driven entirely by these
+    // keys and must not be abandoned by one.
+    const bool shortcut_keys_ok = !s_setup_root && !navFocusedTextarea();
+#else
+    constexpr bool shortcut_keys_ok = true;
+#endif
     // Backspace tap in a chat = jump to the first NEW message (the one right
     // below the "NEW ----" unread divider) and focus it, so the user reads the
-    // new messages chronologically with plain encoder turns from there; with
+    // new messages chronologically with plain encoder turns (M9: d-pad
+    // up/down presses) from there; with
     // no divider (nothing unread) it jumps to the NEWEST message instead.
     // (The old Backspace role -- jump to latest + focus the composer -- moved
     // to the solo orange/Alt tap, see updatePagerAltTapNext().) The divider
@@ -36843,9 +36910,9 @@ if (g_lv.task && g_lv.task->isManualLock()) {
     // navOnMainPage gate lives in tabForKey). Do this before Map panning so S
     // can leave Map for Settings. If the requested tab is already active, let
     // the key continue: A on Map remains the west-pan control.
-    const int pager_tab = tabForKey(key);
-    if (pager_tab >= 0 && pager_tab != getActiveTab()) {
-      goToTab(pager_tab);
+    const int mnemonic_tab = shortcut_keys_ok ? tabForKey(key) : -1;
+    if (mnemonic_tab >= 0 && mnemonic_tab != getActiveTab()) {
+      goToTab(mnemonic_tab);
       if (g_lv.task) g_lv.task->noteUserInput();
       return;
     }
@@ -36857,7 +36924,7 @@ if (g_lv.task && g_lv.task->isManualLock()) {
     // the same adjustment the T-Deck trackball's LEFT/RIGHT already does —
     // rather than a fixed step that's wrong for every slider's range. (Was
     // D/F; moved to Q/E to free up the map-panning keys below.)
-    if (key == 'q' || key == 'Q' || key == 'e' || key == 'E') {
+    if (shortcut_keys_ok && (key == 'q' || key == 'Q' || key == 'e' || key == 'E')) {
       lv_obj_t* focused = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr;
       if (focused && lv_obj_check_type(focused, &lv_slider_class)) {
         navMoveDir((key == 'e' || key == 'E') ? NAV_RIGHT : NAV_LEFT);
@@ -36868,7 +36935,8 @@ if (g_lv.task && g_lv.task->isManualLock()) {
     // to drag it), reusing the same mapNudge() step/re-render Tanmatsu's
     // Ctrl+Arrow already uses. X replaces S because S is now the Settings
     // mnemonic. W=north A=west X=south D=east.
-    if ((key == 'w' || key == 'W' || key == 'a' || key == 'A' ||
+    if (shortcut_keys_ok &&
+        (key == 'w' || key == 'W' || key == 'a' || key == 'A' ||
          key == 'x' || key == 'X' || key == 'd' || key == 'D') &&
         getActiveTab() == MAP_TAB_INDEX) {
       switch (key) {
@@ -36879,7 +36947,7 @@ if (g_lv.task && g_lv.task->isManualLock()) {
       }
       return;
     }
-#endif
+#endif  // TLORA_PAGER || HAS_THINKNODE_M9 (no-touch keyboard shortcuts)
 #if CAP_TRACKBALL || defined(HAS_THINKNODE_M9)
     // A field is focused but we're in navigate mode: select/Enter starts editing it, so the
     // letter-nav keys keep navigating until you explicitly enter the field (matches navPump).
@@ -36959,6 +37027,12 @@ if (g_lv.task && g_lv.task->isManualLock()) {
         hwKeyDismissTopPopup();
         if (g_lv.task) g_lv.task->noteUserInput();
       }
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+    }
+    // The mnemonic block above already handled (and returned for) every tab
+    // jump this fallback could make, with the focused-field guard the fallback
+    // doesn't have — reaching here means the key was deliberately declined.
+#else
     } else {
       const int tab = tabForKey(key);
       if (tab >= 0 && g_lv.tabview) {
@@ -36966,6 +37040,7 @@ if (g_lv.task && g_lv.task->isManualLock()) {
         if (g_lv.task) g_lv.task->noteUserInput();
       }
     }
+#endif
     return;
   }
   txtMenuHide();   // any keypress while editing dismisses an open edit menu
@@ -42592,12 +42667,17 @@ static const uint32_t kThemeColors[] = {
   0x15B6A6, 0x57585A, 0x3B82F6, 0x2DA8A0, 0x3FA34D, 0x8B5CF6,
   0xD2569E, 0xD0524A, 0xE0823C, 0xC8A030, 0x5B6BD0, 0xA85AB0,
 };
+static constexpr int kThemeColorCount = sizeof(kThemeColors) / sizeof(kThemeColors[0]);
 
 static lv_obj_t* s_accent_picker  = nullptr;
 static lv_obj_t* s_accent_hex_ta  = nullptr;
 static lv_obj_t* s_accent_preview = nullptr;
 static uint32_t  s_accent_sel     = 0x15B6A6u;   // currently-selected colour (default: brand teal)
 static bool      s_accent_syncing = false;
+#if defined(HAS_M9_KEYBOARD)
+static lv_obj_t* s_accent_swatches[kThemeColorCount] = { nullptr };
+static int       s_accent_nav_idx = -1;
+#endif
 
 static void accentPreviewShow(uint32_t rgb) {
   if (s_accent_preview)
@@ -42626,9 +42706,60 @@ static void accentSetSelection(uint32_t rgb, bool update_hex) {
     s_accent_syncing = false;
   }
 }
+#if defined(HAS_M9_KEYBOARD)
+// Keep D-pad movement inside the swatch grid while a colour exists in the
+// requested direction. At an edge, return false so normal spatial navigation
+// can leave the grid for Close, the hex field, Save, or Reset.
+static bool m9AccentPickerMove(int key) {
+  if (!s_accent_picker || !lv_obj_is_valid(s_accent_picker) || !s_nav_group) return false;
+  if (key != M9_KEY_UP && key != M9_KEY_DOWN && key != M9_KEY_LEFT && key != M9_KEY_RIGHT) return false;
+
+  lv_obj_t* focused = lv_group_get_focused(s_nav_group);
+  int current = -1;
+  for (int i = 0; i < kThemeColorCount; ++i) {
+    if (s_accent_swatches[i] == focused) { current = i; break; }
+  }
+  if (current < 0) return false;
+
+  lv_area_t from;
+  lv_obj_get_coords(focused, &from);
+  const int from_x = (from.x1 + from.x2) / 2;
+  const int from_y = (from.y1 + from.y2) / 2;
+  int best = -1;
+  long best_score = 0x7FFFFFFFL;
+  for (int i = 0; i < kThemeColorCount; ++i) {
+    lv_obj_t* swatch = s_accent_swatches[i];
+    if (i == current || !swatch || !lv_obj_is_valid(swatch)) continue;
+    lv_area_t to;
+    lv_obj_get_coords(swatch, &to);
+    const int dx = (to.x1 + to.x2) / 2 - from_x;
+    const int dy = (to.y1 + to.y2) / 2 - from_y;
+    const bool in_direction = key == M9_KEY_UP    ? dy < 0
+                            : key == M9_KEY_DOWN  ? dy > 0
+                            : key == M9_KEY_LEFT  ? dx < 0
+                                                  : dx > 0;
+    if (!in_direction) continue;
+    const long primary = (key == M9_KEY_UP || key == M9_KEY_DOWN) ? dy : dx;
+    const long cross   = (key == M9_KEY_UP || key == M9_KEY_DOWN) ? dx : dy;
+    const long score = primary * primary + cross * cross;
+    if (score < best_score) { best_score = score; best = i; }
+  }
+  if (best < 0) return false;
+
+  s_accent_nav_idx = best;
+  lv_group_focus_obj(s_accent_swatches[best]);
+  return true;
+}
+#endif
 static void accentSwatchCb(lv_event_t* e) {
-  if (lv_event_get_code(e) == LV_EVENT_CLICKED)
-    accentSetSelection((uint32_t)(uintptr_t)lv_event_get_user_data(e), true);
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+#if defined(HAS_M9_KEYBOARD)
+  lv_obj_t* target = lv_event_get_target(e);
+  for (int i = 0; i < kThemeColorCount; ++i) {
+    if (s_accent_swatches[i] == target) { s_accent_nav_idx = i; break; }
+  }
+#endif
+  accentSetSelection((uint32_t)(uintptr_t)lv_event_get_user_data(e), true);
 }
 static void accentHexCb(lv_event_t* e) {
   if (s_accent_syncing || !s_accent_hex_ta) return;
@@ -42638,6 +42769,10 @@ static void accentHexCb(lv_event_t* e) {
 static void accentPickerClose() {
   if (s_accent_picker) { popupClose(&s_accent_picker); }
   s_accent_hex_ta = s_accent_preview = nullptr;
+#if defined(HAS_M9_KEYBOARD)
+  for (int i = 0; i < kThemeColorCount; ++i) s_accent_swatches[i] = nullptr;
+  s_accent_nav_idx = -1;
+#endif
 }
 static void accentPickerCloseCb(lv_event_t* e) {
   if (lv_event_get_code(e) == LV_EVENT_CLICKED) accentPickerClose();
@@ -42696,7 +42831,7 @@ static void openAccentPicker() {
   lv_obj_set_style_pad_row(grid, 8, LV_PART_MAIN);
   lv_obj_set_style_pad_column(grid, 8, LV_PART_MAIN);
   lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
-  for (int i = 0; i < (int)(sizeof(kThemeColors)/sizeof(kThemeColors[0])); ++i) {
+  for (int i = 0; i < kThemeColorCount; ++i) {
     lv_obj_t* sb = lv_btn_create(grid);
     lv_obj_set_size(sb, 28, 28);
     lv_obj_set_style_radius(sb, 7, LV_PART_MAIN);
@@ -42705,6 +42840,10 @@ static void openAccentPicker() {
     lv_obj_set_style_border_width(sb, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(sb, lv_color_hex(0x202224), LV_PART_MAIN);
     lv_obj_add_event_cb(sb, accentSwatchCb, LV_EVENT_CLICKED, (void*)(uintptr_t)kThemeColors[i]);
+  #if defined(HAS_M9_KEYBOARD)
+    lv_obj_add_flag(sb, NAV_COLOR_SWATCH_FLAG);
+    s_accent_swatches[i] = sb;
+  #endif
   }
 
   lv_obj_t* hexrow = lv_obj_create(s_accent_picker);
@@ -42726,6 +42865,9 @@ static void openAccentPicker() {
 
   s_accent_preview = lv_obj_create(s_accent_picker);
   lv_obj_remove_style_all(s_accent_preview);
+#if defined(HAS_M9_KEYBOARD)
+  lv_obj_clear_flag(s_accent_preview, LV_OBJ_FLAG_CLICKABLE);
+#endif
   lv_obj_set_size(s_accent_preview, 150, 28);
   lv_obj_set_style_radius(s_accent_preview, 6, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_accent_preview, LV_OPA_COVER, LV_PART_MAIN);
@@ -42752,6 +42894,21 @@ static void openAccentPicker() {
   useChainedFont(rl);
 
   accentSetSelection(touchPrefsGetAccentColor(), true);
+#if defined(HAS_M9_KEYBOARD)
+  const uint32_t current = touchPrefsGetAccentColor() & 0xFFFFFFu;
+  uint32_t nearest_dist = 0xFFFFFFFFu;
+  s_accent_nav_idx = 0;
+  for (int i = 0; i < kThemeColorCount; ++i) {
+    const int dr = (int)((kThemeColors[i] >> 16) & 0xFFu) - (int)((current >> 16) & 0xFFu);
+    const int dg = (int)((kThemeColors[i] >> 8)  & 0xFFu) - (int)((current >> 8)  & 0xFFu);
+    const int db = (int)( kThemeColors[i]        & 0xFFu) - (int)( current        & 0xFFu);
+    const uint32_t dist = (uint32_t)(dr * dr + dg * dg + db * db);
+    if (dist < nearest_dist) { nearest_dist = dist; s_accent_nav_idx = i; }
+  }
+  lv_obj_update_layout(s_accent_picker);
+  s_nav_focus_hint = s_accent_swatches[s_accent_nav_idx];
+  navMarkDirty();
+#endif
 }
 static void openAccentPickerCb(lv_event_t* e) {
   if (lv_event_get_code(e) == LV_EVENT_CLICKED) openAccentPicker();
@@ -43639,10 +43796,13 @@ static void buildUiTree() {
   lv_obj_add_event_cb(tab_btns, navMenubarSizeCb, LV_EVENT_SIZE_CHANGED, nullptr);  // keep the keyboard-nav key hints positioned
 #endif
 
-  // Tab labels: icons-only on touch targets; the 480px-wide Pager prefixes each
-  // icon with its physical-keyboard mnemonic so the shortcuts are discoverable.
+  // Tab labels: icons-only on touch targets; the two no-touch keyboard boards
+  // (480px Pager, 320px landscape M9) suffix each icon with its physical-keyboard
+  // mnemonic so the shortcuts are discoverable without reading a manual. The M9
+  // is the narrower of the two at 64px per cell, which still leaves ~30px of
+  // slack around a 16px icon + space + letter at the fixed 16px tab font.
   // Add order == index order: Chats(0), Contacts(1), Home(2, middle), Map(3), Settings(4).
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
   lv_obj_t* tab_chats    = lv_tabview_add_tab(g_lv.tabview, LV_SYMBOL_ENVELOPE " M");
   lv_obj_t* tab_contacts = lv_tabview_add_tab(g_lv.tabview, TOUCH_SYM_PERSON " C");
   lv_obj_t* tab_home     = lv_tabview_add_tab(g_lv.tabview, LV_SYMBOL_HOME " H");
@@ -43670,7 +43830,7 @@ static void buildUiTree() {
     TAB_LAST           = 4;
   }
 #endif
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
   lv_obj_t* tab_settings = lv_tabview_add_tab(g_lv.tabview, LV_SYMBOL_SETTINGS " S");
 #else
   lv_obj_t* tab_settings = lv_tabview_add_tab(g_lv.tabview, LV_SYMBOL_SETTINGS);

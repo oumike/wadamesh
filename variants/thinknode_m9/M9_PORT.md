@@ -316,12 +316,52 @@ These are left intentionally unset/unwired rather than guessed:
       hardware keys themselves work correctly elsewhere) — likely reads input
       through its own loop rather than the shared `handleHwKey()`/nav-group
       system; not yet traced.
-    - Map panning: currently no way to pan the map at all with the d-pad
-      (arrows only drive UI nav). Idea, not started: use `M9_KEY_ENTER_LONG`
-      (now wired and proven via the lock-screen/context-menu work below) to
-      toggle between UI-nav mode and map-pan mode.
 
     **Resolved this pass:**
+    - Map panning: **fixed** — the d-pad still only drives UI nav (no mode
+      toggle needed, so the `M9_KEY_ENTER_LONG` mode-switch idea was dropped),
+      and panning moved onto the keyboard instead: **W/A/X/D** on the Map tab,
+      the same four keys the pager uses, through the same `mapNudge()` the
+      Tanmatsu's Ctrl+Arrow already calls. Part of the shared no-touch
+      shortcut set below.
+    - No-touch keyboard shortcuts adopted from the pager (see
+      `TLORA_PAGER_SHORTCUTS.md`, which describes the same key set): both
+      boards have no touchscreen, so the things a finger would otherwise do
+      each need a key. Now live on the M9:
+      - **M / C / H / A / S** — jump to Mail / Contacts / Home / Map /
+        Settings. Only at the top level of a main tab (`navOnMainPage()` inside
+        `tabForKey()`), so a letter can never abandon an open chat, settings
+        detail, app page, or popup. These overlap the dedicated hardware
+        Message/Home/Map keys; **C** and **S** have no hardware key at all and
+        were previously reachable only by walking the tab bar. Each letter is
+        printed beside its bottom-bar icon (`LV_SYMBOL_ENVELOPE " M"` …), the
+        pager's discoverability trick — the M9 is the narrower of the two
+        boards at 320px landscape / 64px per cell, which still leaves ~30px of
+        slack around a 16px icon + space + letter at the fixed 16px tab font.
+        The optional `navMenubarKeysSync()` hint overlay is now excluded on the
+        M9 for the same reason it is on the pager, and because the letters it
+        draws are the *programmable* tab hotkeys (default E/R/T/U/I) that this
+        board never dispatches — its `#if CAP_TRACKBALL` nav block is compiled
+        out, so the overlay could only ever have misled.
+      - **Q / E** — decrease/increase a focused slider.
+      - **W / A / X / D** — pan the map north/west/south/east on the Map tab.
+        `A` opens Map from another tab and pans west once Map is already
+        active, exactly as on the pager.
+      - **Backspace** (not editing, inside a chat) — jump to the first unread
+        message below the "NEW ----" divider, or the newest message if nothing
+        is unread. Backspace was a dead key here before (M9 has a dedicated
+        hardware Back, and `isDismissKey()` is T-Deck-only).
+
+      One M9-specific guard the pager doesn't need: the pager's `ta` is derived
+      from nav-group focus, so it only reaches the shortcut block when no field
+      holds focus. On the M9 `ta` is null whenever edit mode is off — including
+      while a field is merely *focused* — so the letter shortcuts are
+      explicitly gated on `!navFocusedTextarea() && !s_setup_root`, or `m` on a
+      focused composer would tab-jump instead of waiting to be typed.
+      Backspace's chat jump is deliberately outside that gate: nothing is being
+      typed in navigate mode, and when the user *is* editing, `ta` is non-null
+      and the key deletes a character as normal.
+
     - Lock-screen unlock: fixed via `M9_KEY_ENTER_LONG` (the keyboard
       controller's own hardware-level long-press detection, a distinct byte
       from a normal Enter tap) standing in for "hold the trackball to
