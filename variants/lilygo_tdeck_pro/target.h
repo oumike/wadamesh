@@ -12,8 +12,8 @@
 #include "TDeckProBoard.h"
 #include "TDeckProDisplay.h"
 #include "../../src/helpers/ClockFloorRTC.h"
+#include "../../src/helpers/WadaNmeaLocationProvider.h"
 #include "helpers/sensors/EnvironmentSensorManager.h"
-#include "helpers/sensors/MicroNMEALocationProvider.h"
 
 extern TDeckProBoard board;
 extern WRAPPER_CLASS radio_driver;

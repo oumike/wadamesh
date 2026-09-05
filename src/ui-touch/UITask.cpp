@@ -36644,15 +36644,27 @@ static void refreshChatList(LvChatPanel& p) {
 
     // Avatar: same FNV-1a hue family as the chat-bubble colours (see
     // usernameBubbleColors), lifted in value so the disc reads on the dark panel.
+  #if !defined(HAS_TDECK_PRO)
     uint32_t hh = 2166136261u;
     for (const char* s2 = name; *s2; ++s2) { hh ^= (uint8_t)*s2; hh *= 16777619u; }
+  #endif
     lv_obj_t* av = lv_obj_create(btn);
     lv_obj_remove_style_all(av);
     lv_obj_add_flag(av, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_clear_flag(av, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);   // taps fall through to the row
     lv_obj_set_size(av, kThreadAvatar, kThreadAvatar);
     lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  #if defined(HAS_TDECK_PRO)
+    // Every generated avatar hue falls below the e-paper luminance threshold,
+    // as does the black initials/emoji ink. Use an outlined paper-white disc
+    // so the glyph remains visible after RGB565 is reduced to one bit.
+    lv_obj_set_style_bg_color(av, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_color(av, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(av, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(av, LV_OPA_COVER, LV_PART_MAIN);
+  #else
     lv_obj_set_style_bg_color(av, lv_color_hsv_to_rgb((uint16_t)(hh % 360u), 55, 42), LV_PART_MAIN);
+  #endif
     lv_obj_set_style_bg_opa(av, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_align(av, LV_ALIGN_LEFT_MID, 8, 0);
     // Avatar content: a user-chosen emoji for channels (thread sheet -> Chat icon),

@@ -8,7 +8,8 @@ WRAPPER_CLASS radio_driver(radio, board);
 
 ESP32RTCClock fallback_clock;
 ClockFloorRTC rtc_clock(fallback_clock);
-MicroNMEALocationProvider gps(Serial1, &rtc_clock);
+WadaNmeaLocationProvider gps(Serial1, &rtc_clock, GPS_RESET, GPS_EN,
+                             PIN_GPS_TX, PIN_GPS_RX, GPS_BAUD_RATE);
 EnvironmentSensorManager sensors(gps);
 TDeckProDisplay display;
 MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
