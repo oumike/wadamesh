@@ -5244,6 +5244,9 @@ static void webPointerRead(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 static void lvglTouchRead(lv_indev_drv_t* indev, lv_indev_data_t* data) {
   (void)indev;
   static lv_point_t p = {0, 0};
+#if defined(HAS_TDECK_PRO)
+  static bool pro_live_press_delivered = false;
+#endif
   ++s_live_diag_reads;
   // When the background polling task is running it is the sole owner of the
   // chsc6x driver's state machine — calling heltecV4CapTouchCheck() from here
@@ -5288,12 +5291,28 @@ static void lvglTouchRead(lv_indev_drv_t* indev, lv_indev_data_t* data) {
   if (heltecV4CapTouchGetLive(&x, &y)) {
     ++s_live_diag_pressed;
     raw_press = true;
+#if defined(HAS_TDECK_PRO)
+    pro_live_press_delivered = true;
+#endif
   } else if (heltecV4CapTouchPopTap(&x, &y)) {
     // Fallback: if live state is missed, emit one press edge from finalized tap.
     ++s_live_diag_tap_edges;
+#if defined(HAS_TDECK_PRO)
+    // A Pro e-paper refresh can block LVGL until after the finger lifts. If
+    // LVGL already received this gesture's live press, replaying the finalized
+    // tap as another PRESSED sample makes the elapsed hold look like a long
+    // press. Consume that duplicate and let this poll report RELEASED.
+    raw_press = !pro_live_press_delivered;
+#else
     raw_press = true;
+#endif
   }
-  if (!raw_press) s_wake_swallow = false;   // finger lifted -> the next touch acts normally
+  if (!raw_press) {
+#if defined(HAS_TDECK_PRO)
+    pro_live_press_delivered = false;
+#endif
+    s_wake_swallow = false;   // finger lifted -> the next touch acts normally
+  }
   if (raw_press
 #if CAP_TRACKBALL
       // Ignore a stray finger on the tab bar while the cursor is up.
@@ -35715,20 +35734,19 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   if (mentions_me) bubble_bg = lv_color_hex(COLOR_CHAT_MENTION_BG);
   if (s_theme_day) sender_col = lv_color_hex(COLOR_CHAT_TEXT);
 #if defined(HAS_TDECK_PRO)
-  const bool epaper_channel = p->channel_mode;
-  if (epaper_channel) {
-    bubble_bg = lv_color_white();
-    sender_col = lv_color_black();
-  }
+  bubble_bg = lv_color_white();
+  sender_col = lv_color_black();
 #endif
   lv_obj_set_style_bg_color(bubble, bubble_bg, LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
 #if defined(HAS_TDECK_PRO)
-  if (epaper_channel) {
-    lv_obj_set_style_border_color(bubble, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_border_width(bubble, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
-  }
+  lv_obj_set_style_bg_opa(bubble, LV_OPA_TRANSP, LV_PART_MAIN);
+#else
+  lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
+#endif
+#if defined(HAS_TDECK_PRO)
+  lv_obj_set_style_border_color(bubble, lv_color_black(), LV_PART_MAIN);
+  lv_obj_set_style_border_width(bubble, 2, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
 #endif
   lv_obj_set_style_pad_hor(bubble, kChatBubblePadH, LV_PART_MAIN);
   lv_obj_set_style_pad_ver(bubble, kChatBubblePadV, LV_PART_MAIN);
@@ -35744,7 +35762,7 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   uint32_t meta_fg = COLOR_SUB;
   chatBuildBubbleMeta(m, p->channel_mode, meta_buf, sizeof(meta_buf), &meta_fg);
 #if defined(HAS_TDECK_PRO)
-  if (epaper_channel) meta_fg = 0x000000;
+  meta_fg = 0x000000;
 #endif
   // All bubble-style threads (channel / DM / room): timestamp + delivery meta on the top row.
   const bool show_sender_line = (p->channel_mode || s_chat_virt.thread_is_room) &&
@@ -35805,7 +35823,7 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   lv_obj_set_style_text_font(tlbl, msg_font, LV_PART_MAIN);
   lv_obj_set_style_text_color(tlbl,
 #if defined(HAS_TDECK_PRO)
-                              epaper_channel ? lv_color_black() : lv_color_hex(COLOR_CHAT_TEXT),
+                              lv_color_black(),
 #else
                               lv_color_hex(COLOR_CHAT_TEXT),
 #endif
@@ -35814,14 +35832,12 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   // Clickable URLs: tint any link blue (recolor tags are zero-width, so wrapping/height
   // below still measure from the plain d.san_text and stay correct).
   int _ua, _ub; const bool has_url = chatUrlSpan(d.san_text, 0, &_ua, &_ub);
-  if (has_url
-#if defined(HAS_TDECK_PRO)
-      && !epaper_channel
-#endif
-     ) {
+#if !defined(HAS_TDECK_PRO)
+  if (has_url) {
     char rc[UITask::MAX_MSG_TEXT + 40];
     if (chatRecolorUrls(d.san_text, rc, sizeof rc)) { lv_label_set_recolor(tlbl, true); lv_label_set_text(tlbl, rc); }
   }
+#endif
   if (txt_size.x > kInnerMaxW) lv_label_set_long_mode(tlbl, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(tlbl, txt_w_used);
   if (txt_w_used > inner_w) inner_w = txt_w_used;
