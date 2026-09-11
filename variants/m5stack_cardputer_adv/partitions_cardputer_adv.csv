@@ -1,0 +1,10 @@
+# M5Stack Cardputer ADV: 8 MB flash, dual OTA, and coredump. Mesh data lives
+# on the mandatory microSD; UI settings stay in NVS. There is no SPIFFS volume.
+# The measured OTA-enabled application is ~2.72 MB, leaving ~416 KiB in each
+# 3 MiB slot.
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x5000,
+otadata,    data, ota,     0xe000,   0x2000,
+app0,       app,  ota_0,   0x10000,  0x300000,
+app1,       app,  ota_1,   0x310000, 0x300000,
+coredump,   data, coredump,0x7F0000, 0x10000,

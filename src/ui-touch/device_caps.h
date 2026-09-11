@@ -25,7 +25,21 @@
 // =============================================================================
 
 // ---- Per-board structural capabilities (factored out of the device names) ----
-#if defined(HAS_WIO_TRACKER_L2)          // ===== Seeed Wio Tracker L2 (ESP32-S3) =====
+#if defined(HAS_CARDPUTER_ADV)           // ===== M5Stack Cardputer ADV + LoRa-1262 Cap =====
+  #define CAP_TOUCH        0
+  #define CAP_ROTATABLE    0
+  #define CAP_LARGE_SCREEN 0   // fixed 240x135 landscape
+  #define CAP_SD           1   // microSD shares the EXT SPI bus with the LoRa cap
+  #define CAP_FILESYSTEM   1
+  #define CAP_GPS          0   // no GPS in the Cardputer or LoRa-1262 Cap
+  #define CAP_OTA          1   // paired 3 MB OTA slots in the 8 MB layout
+  #define CAP_LOCK_SCREEN  0
+  #define CAP_LUA_APPS     0   // no PSRAM
+  #define CAP_CONSOLE      0   // Console commands depend on the Lua host API
+  #define CAP_MAP          0   // tile decoding needs more RAM than this board has
+  #define WADA_LOW_RESOURCE_BOARD 1
+
+#elif defined(HAS_WIO_TRACKER_L2)          // ===== Seeed Wio Tracker L2 (ESP32-S3) =====
   #define CAP_TOUCH        1
   #define CAP_ROTATABLE    0
   #define CAP_LARGE_SCREEN 0   // fixed 320x240 landscape
@@ -161,6 +175,10 @@
   #define CAP_LOCK_SCREEN  0
 #endif
 
+#ifndef CAP_MAP
+  #define CAP_MAP 1
+#endif
+
 // Persisted, restart-to-apply UI-size selector. Large-screen boards already
 // expose it; the Pager adds font-only presets because its 480x222 viewport is
 // wide enough for larger type but too short for global geometry scaling.
@@ -173,7 +191,8 @@
 // ---- Derived input capabilities ---------------------------------------------
 // Physical keyboard: T-Deck matrix, Tanmatsu keypad, the pager's TCA8418, or
 // the ThinkNode M9 keyboard.
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_TANMATSU) || defined(HAS_PAGER_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_TANMATSU) || defined(HAS_PAGER_KEYBOARD) || \
+  defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   #define CAP_KEYBOARD 1
 #else
   #define CAP_KEYBOARD 0
@@ -191,7 +210,8 @@
 // CAP_TRACKBALL` block); the Attaky drains its expander queue in attakyNavPump().
 // NOTE: the Attaky is the first board here with CAP_KEYBOARD == 0, so anything
 // this flag pulls in must not assume a physical keyboard is also compiled.
-#if defined(HAS_TANMATSU) || defined(HAS_TDECK_TRACKBALL) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(ATTAKY_MESH_SERIES)
+#if defined(HAS_TANMATSU) || defined(HAS_TDECK_TRACKBALL) || defined(TLORA_PAGER) || \
+  defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV) || defined(ATTAKY_MESH_SERIES)
   #define CAP_KEYPAD_NAV 1
 #else
   #define CAP_KEYPAD_NAV 0
@@ -257,7 +277,8 @@
 // stranded exactly this way on beta_70 (gadgeteerza).
 //
 // Any board added here must have a drain in the console branch of UITask::loop.
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || CAP_TOUCH
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || \
+  defined(HAS_CARDPUTER_KEYBOARD) || CAP_TOUCH
   #define CAP_CONSOLE_INPUT 1
 #else
   #define CAP_CONSOLE_INPUT 0
@@ -363,8 +384,9 @@
 // Tap) have that headroom; the 2 MB Heltec V4 TFT can't complete the handshake
 // (fetch returns -1), so the Web app is gated out there. Tapping a link in chat still
 // offers "Create QR" everywhere — only "Open in web" is gated to these boards.
-#if defined(HELTEC_LORA_V4_TFT) && !defined(HELTEC_LORA_V4_R8)
-  #define CAP_WEB_BROWSER 0   // 2 MB V4: TLS handshake can't fit
+#if defined(HAS_CARDPUTER_ADV) || \
+    (defined(HELTEC_LORA_V4_TFT) && !defined(HELTEC_LORA_V4_R8))
+  #define CAP_WEB_BROWSER 0   // no-PSRAM Cardputer / 2 MB V4: TLS handshake can't fit
 #else
   #define CAP_WEB_BROWSER 1   // 8 MB boards incl. the V4-R8
 #endif

@@ -29,12 +29,21 @@ enum class TouchUiScreen : uint8_t { Home = 0, ChatInbox = 1, Contacts = 2, Sett
 
 class UITask : public AbstractUITask {
 public:
-  static const int MAX_UI_MESSAGES = 500;
+#ifndef WADA_MAX_UI_MESSAGES
+  #define WADA_MAX_UI_MESSAGES 500
+#endif
+#ifndef WADA_MAX_UI_MESSAGES_SD
+  #define WADA_MAX_UI_MESSAGES_SD 5000
+#endif
+#ifndef WADA_MAX_UI_THREADS
+  #define WADA_MAX_UI_THREADS 48
+#endif
+  static const int MAX_UI_MESSAGES = WADA_MAX_UI_MESSAGES;
   /** Deep ring for devices whose chat history lives on an SD card (T-Deck with a
    *  card, Tanmatsu SD_MMC): 10x the internal-flash ring. Chosen at begin() into
    *  _ui_msg_cap; PSRAM cost ~5000 * sizeof(UIMessage) ≈ 1.3 MB (of 8 MB). */
-  static const int MAX_UI_MESSAGES_SD = 5000;
-  static const int MAX_UI_THREADS = 48;
+  static const int MAX_UI_MESSAGES_SD = WADA_MAX_UI_MESSAGES_SD;
+  static const int MAX_UI_THREADS = WADA_MAX_UI_THREADS;
   static const int MAX_THREAD_NAME = 32;
   // Full MeshCore name width: ContactInfo::name / ChannelDetails::name / NodePrefs::
   // node_name are all char[32], so 31 chars + NUL is exactly lossless. Was 24, which

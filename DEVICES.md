@@ -17,6 +17,7 @@ USB) and the [GitHub releases](https://github.com/ALLFATHER-BV/wadamesh/releases
 | Heltec V4-R8 + Expansion Kit V2 | ESP32-S3 (8 MB octal PSRAM), SX1262 | 2.4" touch (CHSC6x) | Web flasher | Beta (new in beta_45) | As the V4 plus microSD and the Expansion Kit sensors; buzzer supported |
 | LilyGo T-Display P4 | ESP32-P4 + ESP32-C6, SX1262 | AMOLED or TFT-LCD, touch | Web flasher (AMOLED) or the .bin for the LCD SKU | Beta (new in beta_45) | Two screen SKUs; fuel-gauge battery reporting, full TX power |
 | Attaky Mesh Series | ESP32-S3, SX1262 | Touch display + front D-pad | Web flasher | Beta (new in beta_47) | Community port by attakygit (#158/#169); detachable keyboard supported; the front D-pad + SELECT navigate the UI |
+| M5Stack Cardputer ADV + LoRa-1262 Cap | ESP32-S3FN8, SX1262 attachment | 1.14" 240x135 display, 56-key TCA8418 keyboard | PlatformIO / USB, then OTA | Development | Initial no-PSRAM port; FAT32 microSD required; maps, VNC, Lua, and Web reader disabled |
 
 ## Feature notes per board
 
@@ -63,6 +64,12 @@ USB) and the [GitHub releases](https://github.com/ALLFATHER-BV/wadamesh/releases
 - **Seeed Wio Tracker L2**: pre-release touch target under active bring-up. Builds are for
   development and hardware validation only; no public release artifact is
   promised until the port is verified.
+- **M5Stack Cardputer ADV**: requires the M5Stack LoRa-1262 Cap and an attached
+  antenna, plus a FAT32 microSD card for identity and mesh data. The compact
+  keyboard-only UI uses Fn+1 through Fn+5 for Home, Chats, Contacts, the disabled
+  Map status tab, and Settings, and Fn+semicolon/period/comma/slash for directional
+  navigation. The 8 MB, no-PSRAM target uses reduced contact/history limits and
+  paired 3 MiB OTA slots; see [the bring-up notes](variants/m5stack_cardputer_adv/CARDPUTER_ADV_PORT.md).
 
 ## Requested boards
 

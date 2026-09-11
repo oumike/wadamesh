@@ -35,7 +35,9 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #endif
 #if defined(ESP32)
   #include <time.h>
-  #include <SPIFFS.h>
+  #if !defined(HAS_CARDPUTER_ADV)
+    #include <SPIFFS.h>
+  #endif
   // Dedicated LittleFS instance for the map tile pack (separate
   // partition — see variants/heltec_v4/partitions_tft_touch.csv). Keeps
   // tiles out of the SPIFFS partition where /new_prefs + /contacts3 +
@@ -75,7 +77,7 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
   static inline esp_err_t esp_core_dump_image_erase() { return ESP_FAIL; }
   #endif
 #endif
-#if defined(HAS_TDECK_GT911) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
   #include <SD.h>             // microSD — T-Deck/M9 on the LoRa SPI, V4-R8 on the TFT SPI
   #include "SdFastClock.h"    // post-mount operating-clock raise (SD_SPI_FAST_HZ boards)
   #include "sd_diskio.h"      // internal Arduino-SD drive helpers (sdcard_init / sd_*_raw)
@@ -92,6 +94,9 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #endif
 #if defined(HAS_THINKNODE_M9)
   extern SPIClass* m9SharedSPI();
+#endif
+#if defined(HAS_CARDPUTER_ADV)
+  extern SPIClass* cardputerSharedSPI();
 #endif
 #if defined(HAS_TDECK_GT911)
   #include <driver/i2s.h>     // T-Deck MAX98357A speaker amp (notification tones)
@@ -143,6 +148,8 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
   #endif
   #if defined(HAS_TDECK_KEYBOARD)
     #include "../helpers/input/TDeckKeyboard.h"
+  #elif defined(HAS_CARDPUTER_KEYBOARD)
+    #include <CardputerAdvKeyboard.h>
   #elif defined(HAS_M9_KEYBOARD)
     #include <M9Keyboard.h>
   #endif
@@ -175,6 +182,8 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
   #elif defined(HAS_WIO_TRACKER_L2)
     #include <WioTrackerL2Display.h>
     #include <WioTrackerL2Io.h>
+  #elif defined(HAS_CARDPUTER_ADV)
+    #include <CardputerAdvDisplay.h>
   #elif defined(HAS_RAK_TAP_V2)
     #include <LGFXDisplay.h>                 // LovyanGFX FSPI on RAK Tap V2
   #elif defined(HAS_TDISPLAY_P4)
@@ -239,6 +248,8 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
     extern ST7796LCDDisplay display;
   #elif defined(HAS_WIO_TRACKER_L2)
     extern WioTrackerL2Display display;
+  #elif defined(HAS_CARDPUTER_ADV)
+    extern CardputerAdvDisplay display;
   #elif defined(HAS_RAK_TAP_V2) || defined(HELTEC_LORA_V4_R8)
     extern LGFXDisplay display;
   #elif defined(HAS_TDISPLAY_P4)
@@ -1102,7 +1113,7 @@ static inline bool luaAudioStorageBusy() {
 }
 #endif
 
-#if defined(HELTEC_LORA_V4_R8) || defined(HAS_THINKNODE_M9)
+#if defined(HELTEC_LORA_V4_R8) || defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV)
 static bool fmSdTryMount();   // V4-R8/M9 microSD — fwd decl (defined in the mount-helper block below; sdRestoreRun needs it)
 #endif
 #if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER)
@@ -1896,11 +1907,10 @@ constexpr int CHAT_KB_H        = 130;  // on-screen keyboard (portrait)
 // 320×180 landscape).
 #if CAP_LARGE_SCREEN
 constexpr int TABBAR_H = 46;   // taller on the big 800×480 panel — room for the coloured F-key shapes
-#elif defined(HAS_THINKNODE_M9)
+#elif defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV)
 // No tab bar on this board: it is tap-only chrome (navMaybeRebuild deliberately
-// never adds it to the focus group), and the M9 has no touch — the dedicated
-// HOME/MESSAGE/MAP keys and the app drawer's Chats/Contacts/Map/Settings tiles
-// cover every tab. Reclaims the row for content (user request).
+// never adds it to the focus group). M9 has dedicated tab keys; Cardputer uses
+// Fn+1 through Fn+5. Reclaim the row for content on both keyboard-only boards.
 constexpr int TABBAR_H = 0;
 #else
 constexpr int TABBAR_H = 30;   // bottom nav bar (trimmed from 38; icons stay g_font_16)
@@ -2179,7 +2189,7 @@ static bool           s_tb_nav         = false;  // no trackball — read by the
 static lv_indev_drv_t s_nav_keypad_drv;
 #endif
 
-#if defined(HAS_THINKNODE_M9)
+#if defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV)
 // Keyboard-only device (no touch, no trackball): nav is always on, same as Tanmatsu above.
 // Unlike Tanmatsu (which registers its KEYPAD indev as the PRIMARY one, driven by navPump()
 // reading bsp-input), the M9 takes the CAP_KEYPAD_NAV "secondary indev" path the T-Deck's
@@ -4451,7 +4461,7 @@ static lv_obj_t* navOpenDropdown() {
   return nullptr;
 }
 
-#if defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
 // Enter on a focused chat bubble = the same per-message action menu the T-Deck opens on a
 // long-press (Copy / Info / …). Bubbles are the focusable leaves inside the chat's msgs
 // container, so identify one by its parent. Returns true if it handled the Enter. Shared by
@@ -6938,6 +6948,14 @@ static void focusChatComposerOnOpen(LvChatPanel* p) {
   s_nav_ta_editing = true;
   navMarkDirty();
   navMaybeRebuild();
+#elif defined(HAS_CARDPUTER_KEYBOARD)
+  if (!p || !p->composer_ta || !lv_obj_is_valid(p->composer_ta)) return;
+  navMarkDirty();
+  navMaybeRebuild();
+  if (s_nav_group && lv_obj_get_group(p->composer_ta) == s_nav_group) {
+    lv_group_focus_obj(p->composer_ta);
+  }
+  s_nav_ta_editing = true;
 #endif
 }
 
@@ -7264,7 +7282,7 @@ static void accentAltCb(lv_event_t* e) {
 // keystroke / a pick / hiding the keyboard.
 static lv_obj_t* s_accbox    = nullptr;
 static lv_obj_t* s_accbox_ta = nullptr;   // the field the box edits
-#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
+#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
 // No touch on these boards, and the cells below are NAV_SKIP_FLAG (excluded from
 // the normal keyboard/encoder focus group by design, since touch boards pick
 // them by tap) -- without this, the box is completely unreachable here. Fn
@@ -7284,12 +7302,12 @@ static const AccentSet* accentSetFor(char c) {
 static void accentBoxHide() {
   if (s_accbox) { lv_obj_del(s_accbox); s_accbox = nullptr; }
   s_accbox_ta = nullptr;
-#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
+#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   s_accentnav_active = false;
   s_accbox_cell_n = 0;
 #endif
 }
-#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
+#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
 static void accentNavRestyle() {
   for (uint8_t i = 0; i < s_accbox_cell_n; ++i) {
     if (!s_accbox_cells[i]) continue;
@@ -7330,7 +7348,7 @@ static void accentBoxMaybeShow() {
   const AccentSet* set = accentSetFor(last[0]);
   if (!set) return;
   s_accbox_ta = ta;
-#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
+#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   s_accentnav_active = false;   // fresh box -> Fn+Space (re-)arms nav mode
   s_accentnav_idx = 0;
   s_accbox_cell_n = set->n < kAccentNavMax ? set->n : (uint8_t)kAccentNavMax;
@@ -7357,7 +7375,7 @@ static void accentBoxMaybeShow() {
     lv_obj_set_style_bg_color(c, lv_color_hex(COLOR_ACCENT_SURFACE), LV_PART_MAIN);
     lv_obj_set_style_bg_color(c, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_event_cb(c, accentBoxCellCb, LV_EVENT_CLICKED, (void*)set->v[i]);
-#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
+#if defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
     if (i < kAccentNavMax) s_accbox_cells[i] = c;
 #endif
     lv_obj_t* l = lv_label_create(c);
@@ -8353,7 +8371,7 @@ static void threadSelectCb(lv_event_t* e) {
   // which collapses the content so the open-scroll lands at the top. Visible first = correct
   // heights = the open-scroll reaches the newest message.
   refreshChatDetailAsync(p);
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   // Physical keyboard: focus the composer on open so typing goes straight in.
   focusChatComposerOnOpen(&p);
 #endif
@@ -12478,12 +12496,22 @@ static void sysInfoTextRest(char* buf, size_t cap) {
     const int nc = the_mesh.getNumContacts();
     p += snprintf(buf + p, cap - p, "Contact store\n  %d / %d contacts (~%u KB)\n",
                   nc, (int)MAX_CONTACTS, (unsigned)(((uint32_t)nc * 152u) / 1024u));
+#if defined(HAS_CARDPUTER_ADV)
+    const uint64_t sd_tot = SD.totalBytes(), sd_used = SD.usedBytes();
+    if (sd_tot) {
+      p += snprintf(buf + p, cap - p, "  microSD: %llu / %llu KB (%u%%)\n",
+                    (unsigned long long)(sd_used / 1024u),
+                    (unsigned long long)(sd_tot / 1024u),
+                    (unsigned)((sd_used * 100ull) / sd_tot));
+    }
+#else
     const size_t sp_tot = SPIFFS.totalBytes(), sp_used = SPIFFS.usedBytes();
     if (sp_tot) {
       p += snprintf(buf + p, cap - p, "  internal flash: %u / %u KB (%u%%)\n",
                     (unsigned)(sp_used / 1024u), (unsigned)(sp_tot / 1024u),
                     (unsigned)((uint64_t)sp_used * 100ull / sp_tot));
     }
+#endif
     DataStore* ds = the_mesh.getStore();
     if (ds && ds->lastContactsSaveValid()) {
       p += snprintf(buf + p, cap - p, "  last save: %s, %u rec, %u ms\n",
@@ -12704,7 +12732,8 @@ static void useSdStorageToggleCb(lv_event_t* e) {
                                          : TR("Data -> internal on reboot"), 1800);
 }
 
-#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+  defined(HAS_THINKNODE_M9)
 // "Copy internal data to SD": recovery for the beta_36 upgrades where the live
 // profile was orphaned on internal flash while the honored SD toggle adopted an
 // empty card. Pager resumes only onto a card with no identity or the identical
@@ -12838,7 +12867,7 @@ static void useMilesToggleCb(lv_event_t* e) {
 // only via the on-screen button — Tim kept firing messages on the public
 // channel by accident. Physical keyboard only (the on-screen keyboard's
 // checkmark never auto-sent).
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
 static void enterSendsToggleCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
   const bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -14480,7 +14509,11 @@ static void buildDeviceSettings(int sec) {
   }
 
   if (sec == DSEC_GENERAL) {   // --- Storage (SD) ---
-#if CAP_SD || defined(TLORA_PAGER)
+#if defined(HAS_CARDPUTER_ADV)
+  y += settingsRowLabel(body, y, 0,
+          TR("Mesh data: microSD (required)\nUI settings: internal NVS"),
+          COLOR_SUB, &g_font_12, 0) + 6;
+#elif CAP_SD || defined(TLORA_PAGER)
   /* Store all data (identity/prefs/contacts/channels) on the SD card under
      /meshcomod instead of internal flash — for running under Launcher, or just
      to keep everything on a card. Read at boot, so it applies after a reboot. */
@@ -14494,7 +14527,8 @@ static void buildDeviceSettings(int sec) {
     lv_obj_add_event_cb(sw, useSdStorageToggleCb, LV_EVENT_VALUE_CHANGED, nullptr);
     y += LV_MAX(40, h + 12);
   }
-#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+  defined(HAS_THINKNODE_M9)
   /* Where contacts ACTUALLY live this boot. The toggle above is only an intent — if the
      card failed to mount at boot (cold/slow card), contacts silently stay on internal flash
      even with it ON. This line shows the truth and flags that mismatch. */
@@ -14534,7 +14568,8 @@ static void buildDeviceSettings(int sec) {
      fresh-identity) card. This copies EVERYTHING from internal flash over the
      card's copies and reboots into the restored profile. This is a SPIFFS->SD
      recovery on T-Deck, V4-R8 and Pager; Tanmatsu uses SD_MMC with no SPIFFS. */
-#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+  defined(HAS_THINKNODE_M9)
   {
     lv_obj_t* b = lv_btn_create(body);
     lv_obj_set_size(b, lv_pct(96), SC(30));
@@ -14618,7 +14653,7 @@ static void buildDeviceSettings(int sec) {
   {
     y += settingsRowLabel(body, y, 0, TR("Secondary keyboards"), COLOR_SUB, &g_font_12, 0) + 2;
 
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
     const char* kb_cycle_hint = "double-tap SPACE cycles through the ones you enable";
 #else
     const char* kb_cycle_hint = "tap the language key (e.g. EN) on the keyboard to cycle the ones you enable";
@@ -14668,7 +14703,7 @@ static void buildDeviceSettings(int sec) {
                           COLOR_SUB, &g_font_12, 0) + 2;
   }
 
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   /* Enter sends the message (default) vs. inserts a newline so you send only via
      the on-screen button — avoids accidental sends on the public channel. */
   {
@@ -14695,8 +14730,13 @@ static void buildDeviceSettings(int sec) {
 #endif
     lv_obj_add_event_cb(sw, msgFlashToggleCb, LV_EVENT_VALUE_CHANGED, nullptr);
     y += LV_MAX(34, h + 10);
+  #if defined(HAS_CARDPUTER_ADV)
+    y += settingsRowLabel(body, y, 0, TR("wakes the screen on an incoming message"),
+                COLOR_SUB, &g_font_12, 0) + 2;
+  #else
     y += settingsRowLabel(body, y, 0, TR("lights the keyboard + wakes the screen on an incoming message"),
-                          COLOR_SUB, &g_font_12, 0) + 2;
+                COLOR_SUB, &g_font_12, 0) + 2;
+  #endif
   }
 #if defined(HAS_TDECK_KEYBOARD)
   /* Older keyboard controllers do not speak the raw protocol that modifier
@@ -20640,7 +20680,8 @@ static char      s_fm_path[160]  = {0};     // current dir within s_fm_fs (e.g. 
 // a generic fs::FS*; only &SD is real microSD I/O (Internal = SPIFFS). Browsing
 // (fmRefresh) and the file open/save paths call this; mutations re-list via
 // fmRefresh, so they blip the LED too.
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
 static inline bool fmIsSd(fs::FS* fs) { return fs == &SD; }   // Arduino SD (T-Deck/pager/M9 LoRa bus, V4-R8 TFT bus)
 #elif defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4) || defined(HAS_WIO_TRACKER_L2)
 static inline bool fmIsSd(fs::FS* fs) { return fs == &SD_MMC; }   // microSD on SDMMC slot 0
@@ -21828,6 +21869,7 @@ static void fmOpenStorage(fs::FS* fs, const char* store, const char* path) {
   snprintf(s_fm_path, sizeof s_fm_path, "%s", path);
   fmRefresh();
 }
+#if !defined(HAS_CARDPUTER_ADV)
 static void fmInternalClickCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
 #if defined(HAS_TANMATSU)
@@ -21838,6 +21880,7 @@ static void fmInternalClickCb(lv_event_t* e) {
   fmOpenStorage(&SPIFFS, "Internal", "/");
 #endif
 }
+#endif
 
 // 64-bit size formatter for card capacity (cards routinely exceed 4 GB).
 static void fmFmtSize64(uint64_t bytes, char* out, size_t outsz) {
@@ -21846,7 +21889,8 @@ static void fmFmtSize64(uint64_t bytes, char* out, size_t outsz) {
   else                                     snprintf(out, outsz, "%.1f GB", bytes / (1024.0 * 1024 * 1024));
 }
 
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)   // microSD mount/format helpers — Arduino SD on the shared SPI bus
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)   // Arduino SD on a shared SPI bus
 // One shared-SPI accessor per board: the T-Deck/M9 expose their pre-begun SPIClass
 // via tdeckSharedSPI()/m9SharedSPI(); the V4-R8's microSD shares its TFT FSPI bus
 // (heltecV4R8SharedSPI()); the pager accessor returns the same TFT_eSPI SPIClass
@@ -21857,6 +21901,8 @@ static inline SPIClass* sdSharedSPI() { return tloraPagerSharedSPI(); }
 static inline SPIClass* sdSharedSPI() { return heltecV4R8SharedSPI(); }   // V4-R8: micro-SD shares the TFT FSPI bus (CS=3)
 #elif defined(HAS_THINKNODE_M9)
 static inline SPIClass* sdSharedSPI() { return m9SharedSPI(); }
+#elif defined(HAS_CARDPUTER_ADV)
+static inline SPIClass* sdSharedSPI() { return cardputerSharedSPI(); }
 #else
 static inline SPIClass* sdSharedSPI() { return tdeckSharedSPI(); }
 #endif
@@ -23420,6 +23466,7 @@ static void fmShowRoots() {
   lv_obj_clean(s_fm_list);
   if (s_fm_path_lbl) lv_label_set_text(s_fm_path_lbl, TR("Storage"));
 
+#if !defined(HAS_CARDPUTER_ADV)
   char sub[48], us[16], ts[16];
 #if defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4)
   fmFmtSize(FFat.usedBytes(),  us, sizeof us);   // "Internal" = the FAT data partition (locfd / 'storage')
@@ -23432,8 +23479,9 @@ static void fmShowRoots() {
   lv_obj_t* b = lv_list_add_btn(s_fm_list, LV_SYMBOL_DRIVE, sub);
   fmStyleRow(b, COLOR_TEXT);
   lv_obj_add_event_cb(b, fmInternalClickCb, LV_EVENT_CLICKED, nullptr);
+#endif
 
-#if defined(HAS_TDECK_GT911) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)  // microSD row (Arduino SD) — T-Deck + M9 + V4-R8
+#if defined(HAS_TDECK_GT911) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)  // microSD row with in-app formatting
   // Probe the SD only when not in a mount-backoff window, so a persistently
   // unmountable card doesn't re-grind the full retry ladder on every render of
   // this page. Tapping the row below (fmSdMountOrFormatCb) bypasses the gate.
@@ -23449,6 +23497,21 @@ static void fmShowRoots() {
     lv_obj_t* sd = lv_list_add_btn(s_fm_list, LV_SYMBOL_SD_CARD, "SD card   (tap to mount/format)");
     fmStyleRow(sd, COLOR_SUB);
     lv_obj_add_event_cb(sd, fmSdMountOrFormatCb, LV_EVENT_CLICKED, nullptr);
+  }
+#elif defined(HAS_CARDPUTER_ADV)
+  // The keyboard-only Cardputer can browse and retry its card, but deliberately
+  // has no undiscoverable long-press format gesture.
+  if ((s_sd_mounted || millis() >= s_sd_retry_after_ms) && fmSdTryMount()) {
+    char sdl[48], cs[16];
+    fmFmtSize64(s_sd_size, cs, sizeof cs);
+    snprintf(sdl, sizeof sdl, TR("SD card   %s"), cs);
+    lv_obj_t* sd = lv_list_add_btn(s_fm_list, LV_SYMBOL_SD_CARD, sdl);
+    fmStyleRow(sd, COLOR_TEXT);
+    lv_obj_add_event_cb(sd, fmSdClickCb, LV_EVENT_CLICKED, nullptr);
+  } else {
+    lv_obj_t* sd = lv_list_add_btn(s_fm_list, LV_SYMBOL_SD_CARD, TR("SD card   (tap to mount)"));
+    fmStyleRow(sd, COLOR_SUB);
+    lv_obj_add_event_cb(sd, fmSdClickCb, LV_EVENT_CLICKED, nullptr);
   }
 #elif defined(TLORA_PAGER)   // microSD row — browse + mount recovery, no in-app format
   // The card-detect line makes "not present" unambiguous, unlike the T-Deck (no detect
@@ -23556,7 +23619,7 @@ static void fmSearchBtnCb(lv_event_t* e) {
 // exists for the (future) lockscreen and is viewable now. SPIFFS is flat, so
 // writing "/lock/placeholder.png" implicitly creates the folder.
 static void fmSeedLockFolder() {
-#if defined(ESP32)
+#if defined(ESP32) && !defined(HAS_CARDPUTER_ADV)
   static bool tried = false;
   if (tried) return;
   tried = true;
@@ -24108,7 +24171,8 @@ static ReaderLocalResult readerReadLocal(const char* url, uint8_t* raw, size_t c
     s_reader_sd_busy = false;
     storage_claimed = false;
   };
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
   s_reader_sd_busy = true;
   s_reader_sd_owner = xTaskGetCurrentTaskHandle();
   storage_claimed = true;
@@ -29943,7 +30007,8 @@ static void tileFetchTaskFn(void* arg) {
             } else {
               ++s_tile_fetch_short_wr;
               s_tile_fetch_last_wr = 'P';            // short/failed disk write (card full or SD error)
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
               if (s_tile_fs == &SD) sdNoteIoFailure();   // wedge tell (worker task — stamp only)
 #endif
             }
@@ -29951,7 +30016,8 @@ static void tileFetchTaskFn(void* arg) {
         } else {
           ++s_tile_fetch_open_fail;
           s_tile_fetch_last_wr = 'O';                // open("w") failed: dir missing / write-protect / SD bus
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
           if (s_tile_fs == &SD) sdNoteIoFailure();       // wedge tell (worker task — stamp only)
 #endif
         }
@@ -30359,14 +30425,16 @@ static bool loadTileJpeg(uint8_t z, int32_t x, int32_t y,
   // re-downloaded forever and rendered nothing (#tiles). open() is the real existence test; read up to
   // the 100 KB writer cap and use the ACTUAL bytes read. (S3 boards: f.size() works there, but this is
   // equally correct — a transient 100 KB PSRAM buffer per tile, freed right after decode.)
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
   // Launcher installs cache tiles on the raw SD (s_tile_fs == &SD) — same
   // dead-card short-circuit as the SD-pack path above.
   if (s_tile_fs == &SD && s_sd_fail_note_ms) return false;
 #endif
   File f = tileCacheOpen(path, "r");
   if (!f) {
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
     if (s_tile_fs == &SD) sdReadFailedCardDead();
 #endif
     return false;
@@ -33182,6 +33250,9 @@ static void mapFollowToggleCb(lv_event_t* e) {
 // Recenters on self GPS and rebuilds the tile grid. Called from tabChangedCb
 // every time the user switches TO the Map tab.
 static void onMapTabActivated() {
+#if !CAP_MAP
+  return;
+#endif
 #if defined(MULTI_TRANSPORT_COMPANION)
   // Fresh fetch slate each map open: forget the "recently queued" dedup ring so
   // tiles that failed or were dropped on a previous visit get another chance
@@ -33332,6 +33403,21 @@ static void applyMapChrome(bool on) {
 }
 
 static void makeMapTab(lv_obj_t* tab) {
+#if !CAP_MAP
+  lv_obj_set_scroll_dir(tab, LV_DIR_NONE);
+  lv_obj_clear_flag(tab, LV_OBJ_FLAG_SCROLLABLE);
+  styleSurface(tab, COLOR_BG, 0);
+  s_map_page = tab;
+  lv_obj_t* label = lv_label_create(tab);
+  lv_label_set_text(label, "Map unavailable on this no-PSRAM build");
+  lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(label, lv_disp_get_hor_res(nullptr) - 24);
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(label, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+  lv_obj_set_style_text_font(label, &g_font_12, LV_PART_MAIN);
+  lv_obj_center(label);
+  return;
+#endif
 #if defined(TLORA_PAGER)
   // Diagnostic/map chrome stays compact at every Pager UI-size preset so the
   // overlays do not hide the map itself.
@@ -34225,7 +34311,7 @@ static void buildLanguageSettings() {
 #if defined(ESP32)
 // ---- Crash report (coredump) export ---------------------------------------
 // On a panic the IDF writes an ELF coredump to the 'coredump' flash partition
-// (0xFF0000, 64 KB). Surface it so users can hand a crash to the devs: detect it
+// (board-specific offset, 64 KB). Surface it so users can hand a crash to the devs: detect it
 // at boot (crashDumpCheck) and let them save it to the SD card / SPIFFS from
 // Settings → About. Decode later with xtensa-esp32s3-elf-gdb against the matching
 // firmware.elf — see the tdeck-coredump-decode notes.
@@ -34310,7 +34396,9 @@ static bool crashDumpExport(char* out_path, size_t out_cap) {
 #elif defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4)
   if (tanSdTryMount()) { dst = &SD_MMC; used_sd = true; }   // microSD on SDMMC slot 0
 #endif
-#if defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4)
+#if defined(HAS_CARDPUTER_ADV)
+  if (!dst) return false;                  // no internal filesystem on this target
+#elif defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4)
   if (!dst) dst = &FFat;              // no SPIFFS on these boards; internal = the FAT data partition
 #else
   if (!dst) { SPIFFS.begin(false); dst = &SPIFFS; }
@@ -39603,7 +39691,7 @@ static bool anyPopupOpen() { return popupRegistryAny(); }
 static bool hwKeyDismissTopPopup() { return popupRegistryDismissTop(); }
 #endif  // CAP_KEYBOARD || CAP_KEYPAD_NAV (hwKeyDismissTopPopup)
 
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_PAGER_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_PAGER_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
 // Keys that act as "close the popup" when no text field is focused.
 // Which keys a running Lua app must NOT be given. The rule is "an app may never
 // swallow its own exit", so it only bites where a reserved key IS the only exit.
@@ -39653,6 +39741,8 @@ static bool isDismissKey(int key) {
       return true;
     default: return false;
   }
+#elif defined(HAS_CARDPUTER_KEYBOARD)
+  return key == CARDPUTER_KEY_ESCAPE;
 #else
   // The pager's corner letters are real, constantly-typed QWERTY keys (unlike
   // the T-Deck's sparser layout) -- treating them as "dismiss" would eat normal
@@ -40380,7 +40470,9 @@ static void backupAddPath(const char* stored, const char* disp) {
 // would fail on an already-mounted volume), plain SPIFFS on the T-Deck / V4. Mirrors the file
 // manager's "Internal" root so a backup lands where the user can actually see + restore it.
 static fs::FS* backupInternalFs() {
-#if defined(HAS_TDISPLAY_P4)
+#if defined(HAS_CARDPUTER_ADV)
+  return nullptr;
+#elif defined(HAS_TDISPLAY_P4)
   // The P4 hot store moved from FFat to LittleFS('storage') in beta_54 (#167);
   // FFat is never mounted here anymore, so opening it failed every backup (#231).
   return &LittleFS;
@@ -40394,7 +40486,8 @@ static fs::FS* backupInternalFs() {
 static void backupScan() {
   s_backup_count = 0;
   // Internal flash is flat — list any *.json at the root (SPIFFS on T-Deck/V4, FFat on Tanmatsu).
-  File root = backupInternalFs()->open("/");
+  fs::FS* internal = backupInternalFs();
+  File root = internal ? internal->open("/") : File();
   if (root) {
     File e = root.openNextFile();
     while (e) {
@@ -40625,7 +40718,10 @@ static void doExportBackupFile(const char* fname) {
   // mounts it) so a backup truly lands on — and lists from — the SD card.
   if (fmSdTryMount()) { f = SD.open(path, FILE_WRITE); if (f) where = "SD"; }
 #endif
-  if (!f) { f = backupInternalFs()->open(path, FILE_WRITE); }
+  if (!f) {
+    fs::FS* internal = backupInternalFs();
+    if (internal) f = internal->open(path, FILE_WRITE);
+  }
   if (!f) { lv_obj_del(ov); g_lv.task->showAlert(TR("Export failed (can't open file)"), 1800); return; }
   { WdtHeavyGuard _wg;   // a 60 KB backup write to internal flash can trigger a SPIFFS GC
     { FileBufWriter bw(f);
@@ -40641,7 +40737,10 @@ static void doDeleteBackup() {
   if (!s_backup_del_path[0]) return;
   const char* path = s_backup_del_path;
   bool ok = false;
-  if (!strncmp(path, "int:", 4)) { ok = backupInternalFs()->remove(path + 4); }   // FFat on Tanmatsu/P4, SPIFFS elsewhere
+  if (!strncmp(path, "int:", 4)) {
+    fs::FS* internal = backupInternalFs();
+    if (internal) ok = internal->remove(path + 4);
+  }
 #if CAP_SD || defined(TLORA_PAGER)
   else if (!strncmp(path, "sd:", 3)) { if (fmSdTryMount()) ok = SD.remove(path + 3); }
 #endif
@@ -40869,7 +40968,7 @@ static void buildBackupsSettings() {
 // every genuinely T-Deck-specific bit inside this range (the spacebar-lock
 // countdown, HAS_TDECK_GT911 touch bits) is already independently re-gated
 // on its own narrower macro, so it stays excluded for the pager regardless.
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_PAGER_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_PAGER_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
 
 #if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
 // ---- Spacebar lock countdown -------------------------------------------------
@@ -40943,6 +41042,144 @@ static void serviceLockingCountdown(unsigned long now) {
     char b[4]; snprintf(b, sizeof b, "%u", (unsigned)((remain + 999) / 1000));   // 3,2,1
     lv_label_set_text(s_locking_count, b);
   }
+}
+#endif
+
+#if defined(HAS_CARDPUTER_KEYBOARD)
+static bool cardputerHandleNavKey(int key, lv_obj_t* ta) {
+  if (!s_kbd_nav) return false;
+
+  if (s_emoji_sheet) {
+    if (key == CARDPUTER_KEY_LEFT)       emojiSelectorMove(-kEmojiSelStep, 0);
+    else if (key == CARDPUTER_KEY_RIGHT) emojiSelectorMove(kEmojiSelStep, 0);
+    else if (key == CARDPUTER_KEY_UP)    emojiSelectorMove(0, -kEmojiSelStep);
+    else if (key == CARDPUTER_KEY_DOWN)  emojiSelectorMove(0, kEmojiSelStep);
+    else if (key == CARDPUTER_KEY_ENTER) emojiSelectorClick();
+    else if (key == CARDPUTER_KEY_ESCAPE) closeEmojiSheet();
+    else return true;
+    if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+
+  if (s_mentionnav_active) {
+    if (key == CARDPUTER_KEY_UP)         mentionNavMove(-1);
+    else if (key == CARDPUTER_KEY_DOWN)  mentionNavMove(1);
+    else if (key == CARDPUTER_KEY_ENTER) mentionNavConfirm();
+    else if (key == CARDPUTER_KEY_ESCAPE) mentionBoxHide();
+    else return false;
+    if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+
+  if (s_accbox && s_accbox_cell_n > 0) {
+    if (key == CARDPUTER_KEY_LEFT || key == CARDPUTER_KEY_RIGHT) {
+      s_accentnav_active = true;
+      s_accentnav_idx = key == CARDPUTER_KEY_RIGHT
+          ? (s_accentnav_idx + 1) % (int)s_accbox_cell_n
+          : (s_accentnav_idx - 1 + (int)s_accbox_cell_n) % (int)s_accbox_cell_n;
+      accentNavRestyle();
+    } else if (key == CARDPUTER_KEY_ENTER) {
+      accentNavConfirm();
+    } else if (key == CARDPUTER_KEY_ESCAPE || key == CARDPUTER_KEY_BACKSPACE) {
+      accentBoxHide();
+    } else {
+      return false;
+    }
+    if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+
+  if (key >= CARDPUTER_KEY_HOME && key <= CARDPUTER_KEY_SETTINGS) {
+    const int tab = key == CARDPUTER_KEY_HOME ? HOME_TAB_INDEX
+                  : key == CARDPUTER_KEY_CHATS ? CHAT_INBOX_TAB_INDEX
+                  : key == CARDPUTER_KEY_CONTACTS ? CONTACTS_TAB_INDEX
+                  : key == CARDPUTER_KEY_MAP ? MAP_TAB_INDEX
+                  : SETTINGS_TAB_INDEX;
+    if (tab == HOME_TAB_INDEX && getActiveTab() == HOME_TAB_INDEX) {
+      setHomeDrawer(!s_home_drawer_mode);
+    } else {
+      navGoToMainTab(tab);
+    }
+    s_nav_ta_editing = false;
+    s_nav_show = true;
+    if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+
+  if (navOpenDropdown()) {
+    if (key == CARDPUTER_KEY_UP) navPushTap(LV_KEY_UP);
+    else if (key == CARDPUTER_KEY_DOWN) navPushTap(LV_KEY_DOWN);
+    else if (key == CARDPUTER_KEY_LEFT || key == CARDPUTER_KEY_RIGHT) { }
+    else return false;
+    s_nav_show = true;
+    if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+
+  if (key == CARDPUTER_KEY_ESCAPE) {
+    if (ta) {
+      s_nav_ta_editing = false;
+      accentBoxHide();
+      mentionBoxHide();
+    } else if (s_setup_root) {
+      if (s_setup_step > 0) setupShowStep(s_setup_step - 1);
+    } else if (s_power_menu) {
+      closePowerMenu();
+    } else if (s_cc_root) {
+      closeControlCenter();
+    } else if (s_apppage_close && !s_confirm_modal) {
+      s_apppage_close();
+    } else if (anyPopupOpen()) {
+      hwKeyDismissTopPopup();
+    } else if (LvChatPanel* panel = navOpenChatPanel()) {
+      closeChatPanel(panel);
+    } else if (getActiveTab() != HOME_TAB_INDEX) {
+      navGoToMainTab(HOME_TAB_INDEX);
+    } else {
+      navPushTap(LV_KEY_ESC);
+    }
+    s_nav_show = true;
+    if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+
+  if (key == CARDPUTER_KEY_ENTER) {
+    if (ta) return false;
+    if (navOnTabBar()) navSwitchTab(+1);
+    else if (!navEnterBubble()) navPushTap(LV_KEY_ENTER);
+    s_nav_show = true;
+    if (g_lv.task) g_lv.task->noteUserInput();
+    return true;
+  }
+
+  NavDir direction;
+  switch (key) {
+    case CARDPUTER_KEY_UP:    direction = NAV_UP; break;
+    case CARDPUTER_KEY_DOWN:  direction = NAV_DOWN; break;
+    case CARDPUTER_KEY_LEFT:  direction = NAV_LEFT; break;
+    case CARDPUTER_KEY_RIGHT: direction = NAV_RIGHT; break;
+    default: return false;
+  }
+
+  if (ta && (key == CARDPUTER_KEY_LEFT || key == CARDPUTER_KEY_RIGHT)) {
+    if (key == CARDPUTER_KEY_LEFT) lv_textarea_cursor_left(ta);
+    else                           lv_textarea_cursor_right(ta);
+  } else {
+    if (ta) s_nav_ta_editing = false;
+    lv_obj_t* const previous = s_nav_group ? lv_group_get_focused(s_nav_group) : nullptr;
+    if (navOnTabBar() && (direction == NAV_LEFT || direction == NAV_RIGHT)) {
+      navSwitchTab(direction == NAV_LEFT ? -1 : 1);
+    } else {
+      navMoveDir(direction);
+      if (s_nav_group && lv_group_get_focused(s_nav_group) == previous &&
+          (direction == NAV_UP || direction == NAV_DOWN)) {
+        navScrollFocused(direction == NAV_UP);
+      }
+    }
+  }
+  s_nav_show = true;
+  if (g_lv.task) g_lv.task->noteUserInput();
+  return true;
 }
 #endif
 
@@ -41494,8 +41731,8 @@ if (g_lv.task && g_lv.task->isManualLock()) {
     g_lv.task->lockscreenReveal();
     return;
   }
-#if defined(HAS_M9_KEYBOARD)
-  // M9 has no touch to wake the screen the way T-Deck/Heltec V4 do — mirror Tanmatsu's
+#if defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
+  // Keyboard-only boards have no touch to wake the screen — mirror Tanmatsu's
   // navPump() pattern: any key wakes it (noteUserInput() wakes internally when the screen
   // is off), then THIS keypress is swallowed rather than also acted on, so waking doesn't
   // also navigate or type.
@@ -41515,7 +41752,7 @@ if (g_lv.task && g_lv.task->isManualLock()) {
   if (g_lv.task) g_lv.task->noteUserInput();
   noteKbActivity();   // any key counts as activity for the keyboard-backlight auto mode too
 #endif
-#endif  // HAS_M9_KEYBOARD (wake-from-idle if/else)
+#endif  // keyboard-only wake-from-idle if/else
 #if defined(HAS_M9_KEYBOARD)
   // The glyph grid has a private selection model (shared with the T-Deck
   // trackball). Drive it directly so arrows cannot escape the modal and OK
@@ -41596,6 +41833,9 @@ if (g_lv.task && g_lv.task->isManualLock()) {
   // arrows go back to the caret the instant it closes.
   if (m9AccentBoxHandleKey(key)) return;
   if (m9HandleArrowKey(key, ta)) return;    // ← runs BEFORE the if(!ta) split
+#endif
+#if defined(HAS_CARDPUTER_KEYBOARD)
+  if (cardputerHandleNavKey(key, ta)) return;
 #endif
   if (!ta) {
 #if defined(TLORA_PAGER)
@@ -41686,7 +41926,7 @@ if (g_lv.task && g_lv.task->isManualLock()) {
       return;
     }
 #endif
-#if CAP_TRACKBALL || defined(HAS_THINKNODE_M9)
+#if CAP_TRACKBALL || defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV)
     // A field is focused but we're in navigate mode: select/Enter starts editing it, so the
     // letter-nav keys keep navigating until you explicitly enter the field (matches navPump).
     // navFocusedTextarea() (nav-group focus), not the local ta_focused (kbd-bound field): the
@@ -41882,7 +42122,7 @@ if (g_lv.task && g_lv.task->isManualLock()) {
     // goes through hideKb(); this covers the physical-keyboard Enter.
     accentBoxHide();
     mentionBoxHide();
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
     if (s_editor_ta && ta == s_editor_ta) {
       lv_textarea_add_char(ta, '\n');   // multiline editor: Enter inserts a newline
     } else if (s_term_input_ta && s_kb_bind_ta == s_term_input_ta) {
@@ -43034,6 +43274,14 @@ static void applyBrightness(uint8_t pct) {
   s_brightness_pct = pct;
   display.setBrightness((uint8_t)((uint32_t)pct * 255u / 100u));
 }
+#elif defined(HAS_CARDPUTER_ADV)
+static uint8_t s_brightness_pct = 63;
+static void applyBrightness(uint8_t pct) {
+  if (pct < 5) pct = 5;
+  if (pct > 100) pct = 100;
+  s_brightness_pct = pct;
+  display.setBrightness((uint8_t)((uint32_t)pct * 255u / 100u));
+}
 #elif defined(HAS_THINKNODE_M9)
 // M9: BL_EN (GPIO17) is a PNP transistor gate. LEDC PWM confirmed working on hardware
 // (Specter bring-up), but the duty is INVERTED — lower duty on the base = MORE conduction
@@ -43096,7 +43344,12 @@ static void openControlCenter() {
   // the screen behind the translucent card — that keeps the panel's own content crisp/readable
   // while the card fill stays see-through enough to still read as glass.
   lv_obj_set_style_bg_opa(s_cc_root, LV_OPA_70, LV_PART_MAIN);
+#if defined(HAS_CARDPUTER_ADV)
+  lv_obj_set_scroll_dir(s_cc_root, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(s_cc_root, LV_SCROLLBAR_MODE_AUTO);
+#else
   lv_obj_clear_flag(s_cc_root, LV_OBJ_FLAG_SCROLLABLE);
+#endif
   lv_obj_move_foreground(s_cc_root);
   lv_obj_add_event_cb(s_cc_root, ccBackdropCb, LV_EVENT_CLICKED, nullptr);
 
@@ -43129,6 +43382,10 @@ static void openControlCenter() {
   // text off the bottom of the physical display. Size from the actual
   // available height instead of the shared constant, with a small margin.
   const int card_h = sh - STATUSBAR_H - 4 - 6;
+#elif defined(HAS_CARDPUTER_ADV)
+  // The physical viewport below the status bar is only about 113 px. Keep the
+  // established control geometry and let keyboard focus scroll the root.
+  const int card_h = 212;
 #elif defined(HAS_TDISPLAY_P4)
   // Tall panel (1232 px): the shared V4 236px card is far too short here. The P4's
   // GPS line sits lower (it clears two 30px sliders, so gps_y ~124 vs the V4's ~70),
@@ -43522,6 +43779,20 @@ static void openControlCenter() {
            -1, nullptr, CC_NAV_SCREENSHOT);
 #endif
   // (Power is the round icon in the card's top-right corner, not a grid chip.)
+}
+
+// Reboot, but let the user read WHY first. Kept outside CAP_LUA_APPS because
+// theme and orientation changes use it even on low-memory boards without Lua.
+static void langRebootTimerCb(lv_timer_t* t) {
+  (void)t;
+  if (g_lv.task) g_lv.task->rebootDevice();
+}
+
+static void rebootWithNotice(const char* msg) {
+  if (g_lv.task) g_lv.task->showAlert(msg, 2400);
+  lv_timer_t* t = lv_timer_create(langRebootTimerCb, 1800, nullptr);
+  if (t) lv_timer_set_repeat_count(t, 1);
+  else if (g_lv.task) g_lv.task->rebootDevice();
 }
 
 #if CAP_LUA_APPS
@@ -43956,28 +44227,6 @@ static void luaStoreHideSwitchCb(lv_event_t* e) {
 }
 
 // ---- Languages tab actions ----
-// Every language change needs a restart to re-render the whole UI. Show WHY
-// first: showAlert + an immediate rebootDevice() never painted (the reboot ran
-// before LVGL's next frame), so the device just went dark under the user's
-// finger. Schedule the reboot instead, so the notice is on screen for it.
-static void langRebootTimerCb(lv_timer_t* t) {
-  (void)t;                                  // repeat_count 1 -> LVGL deletes it
-  if (g_lv.task) g_lv.task->rebootDevice();
-}
-
-// Reboot, but let the user read WHY first. showAlert() only creates the notice;
-// it is painted by the next LVGL frame, and rebootDevice() never returns to one,
-// so announcing a reboot and then calling it immediately shows nothing at all.
-// Scheduling the reboot on a one-shot timer hands control back to LVGL, the
-// notice paints, and the device goes down 1.8 s later with the reason on screen.
-// Any setting that reboots should go through here.
-static void rebootWithNotice(const char* msg) {
-  if (g_lv.task) g_lv.task->showAlert(msg, 2400);
-  lv_timer_t* t = lv_timer_create(langRebootTimerCb, 1800, nullptr);
-  if (t) lv_timer_set_repeat_count(t, 1);
-  else if (g_lv.task) g_lv.task->rebootDevice();   // no timer slot: don't strand the user
-}
-
 static void langRebootWithNotice(const char* msg) {
   s_luastore_busy = true;                   // swallow further taps on the way out
   rebootWithNotice(msg);
@@ -44785,7 +45034,7 @@ static void openThreadDetailByIdx(int idx, bool channel) {
   hideKb();
   if (p.overlay) { lv_obj_clear_flag(p.overlay, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(p.overlay); }
   refreshChatDetailAsync(p);   // AFTER un-hiding so bubbles measure correctly and the open-scroll reaches the newest message
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   focusChatComposerOnOpen(&p);  // physical keyboard: auto-focus the composer so typing goes straight in
 #elif defined(HAS_TANMATSU)
   navMarkDirty();      // keypad nav: rebuild the focus group onto the chat overlay + focus the composer
@@ -44954,7 +45203,7 @@ static void appTileCb(lv_event_t* e) {
     case APPACT_SIGNAL:    openSignalInfoPopup(); return;   // signal/traffic + auto-discover settings
     case APPACT_SPECTRUM:  openSpectrumPage();   return;   // swept RF spectrum analyzer (borrows the radio)
     case APPACT_DISCOVER:  openDiscoverPage();   return;   // active node-discovery sweep + nearby list
-#if !defined(HAS_TANMATSU)
+#if !defined(HAS_TANMATSU) && !defined(HAS_CARDPUTER_ADV)
     case APPACT_VNC:       openVncPage();        return;   // screen mirror + remote control from a browser
     case APPACT_REMOTE:    openRemotePage();     return;   // reboot into the web-resolution headless UI
 #endif
@@ -45415,7 +45664,7 @@ static void openAppDrawer() {
     { LV_SYMBOL_GPS,       "Map",       APPACT_MAP,      0,         0x53C06B },      // location green
     { LV_SYMBOL_REFRESH,   "Discover",  APPACT_DISCOVER, 0,         0x9B59FF },      // active node-discovery sweep (purple)
     { LV_SYMBOL_UPLOAD,    "Advertise", APPACT_ADVERT,   0,         0xE072B0 },      // broadcast magenta
-#if !defined(HAS_TANMATSU)
+#if !defined(HAS_TANMATSU) && !defined(HAS_CARDPUTER_ADV)
     { LV_SYMBOL_IMAGE,     "VNC",       APPACT_VNC,      0,         0x6C7CF0 },      // browser screen-mirror indigo
     { LV_SYMBOL_WIFI,      "Remote",    APPACT_REMOTE,   0,         0x15B6A6 },      // headless web-resolution UI (brand teal)
 #endif
@@ -50759,7 +51008,13 @@ static bool uiDataFsReady() {
     return false;
   }
 #endif
-#if defined(HAS_WIO_TRACKER_L2)
+#if defined(HAS_CARDPUTER_ADV)
+  if (!(sdAdoptLiveMount() || fmSdTryMount())) return false;
+  SD.mkdir("/meshcomod");
+  s_ui_data_fs = &SD;
+  strncpy(s_ui_data_root, "/meshcomod", sizeof s_ui_data_root - 1);
+  return true;
+#elif defined(HAS_WIO_TRACKER_L2)
   // Follow the boot-time DataStore decision. Never attach a card later in the
   // same boot, because the in-memory ring was not loaded from that profile.
   if (g_full_data_on_sd && SD_MMC.cardType() != CARD_NONE) {
@@ -52369,7 +52624,8 @@ static bool uiDataFsIsSdCard() {
   if (!uiDataFsReady()) return false;
 #if defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4) || defined(HAS_WIO_TRACKER_L2)
   return s_ui_data_fs == &SD_MMC;
-#elif defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#elif defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
   return s_ui_data_fs == &SD;
 #else
   return false;
@@ -52386,7 +52642,8 @@ static File uiDataOpen(const char* name, const char* mode) {
   if (!uiDataFsReady()) return File();
   char p[80]; snprintf(p, sizeof p, "%s%s", s_ui_data_root, name);
   File f = s_ui_data_fs->open(p, mode);
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
   // A failed WRITE open on the SD-backed history store is the wedge tell (reads
   // fail legitimately on first boot). Called from the loop task AND the core-0
   // history worker — sdNoteIoFailure is a volatile stamp, safe from both.
@@ -53040,7 +53297,8 @@ static bool uiMsgsWriteResult(bool ok) {
     s_msgs_write_fail_ms = m ? m : 1;
     s_msgs_write_fail_epoch = ep;
     if (s_msgs_write_fails < 0xFFFFu) s_msgs_write_fails = s_msgs_write_fails + 1;
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
     if (s_ui_data_fs == &SD) sdNoteIoFailure();
 #endif
   }
@@ -54861,7 +55119,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #endif
 #endif
 
-#if defined(ESP32)
+#if defined(ESP32) && !defined(HAS_CARDPUTER_ADV)
   // One-time SPIFFS cleanup + audit. Earlier dev builds wrote map tiles to
   // SPIFFS (/tiles/<z>/<x>/<y>.jpg) before the dedicated "tiles" LittleFS
   // partition existed; the spiffs partition keeps its old offset across the
@@ -55029,7 +55287,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     // Wi-Fi driver has taken the internal heap. On the V4 that left a 4-byte
     // largest block, so the worker could never start and tiles, the update
     // check and the app catalog were all silently dead.
+  #if CAP_MAP
     reserveTileFetchStack();
+  #endif
     lv_init();
     initTouchFontFallbacks();
     // NB: re-pointing the LVGL theme's font here does NOT work (tried, verified
@@ -55163,6 +55423,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     // UI-init re-apply matches the boot splash orientation.
     s_ui_rotation = LV_DISP_ROT_90;
 #endif
+  #if defined(HAS_CARDPUTER_ADV)
+    // M5Cardputer exposes the panel in its fixed 240x135 landscape orientation.
+    s_ui_rotation = LV_DISP_ROT_NONE;
+  #endif
 #if defined(HAS_RAK_TAP_V2)
     // RAK Tap V2 panel is rotated 270° in hardware (DISPLAY_ROTATION=3); the UI
     // must match so LVGL renders the full 320x240 landscape surface.
@@ -55176,7 +55440,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     // Display and touch share this landscape transform.
     s_ui_rotation = LV_DISP_ROT_90;
 #endif
-#if !defined(HAS_TANMATSU)
+#if !defined(HAS_TANMATSU) && !defined(HAS_CARDPUTER_ADV)
     // REMOTE mode: render the UI to a virtual 480x800 PORTRAIT display for the web
     // (headless/browser use). No physical-panel rotation — the panel is a placeholder.
     s_remote_mode = touchPrefsGetRemoteMode();
@@ -55272,6 +55536,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #elif defined(HAS_WIO_TRACKER_L2)
   g_lv.disp_drv.hor_res  = 320;
   g_lv.disp_drv.ver_res  = 240;
+#elif defined(HAS_CARDPUTER_ADV)
+  g_lv.disp_drv.hor_res  = 240;
+  g_lv.disp_drv.ver_res  = 135;
 #else
     // Landscape rotates the panel in HARDWARE (smooth — no per-pixel software
     // rotation each flush), so tell LVGL the already-rotated resolution and let
@@ -55390,7 +55657,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     }
 #endif
 
-#if !defined(HAS_TANMATSU)
+#if !defined(HAS_TANMATSU) && !defined(HAS_CARDPUTER_ADV)
     // Web UI mirror: stream this display + accept a phone browser's taps as a second
     // pointer indev (opt-in via the VNC/REMOTE apps; see WebMirror / the WS server).
     // Size the remote ring to just above ONE frame (w*h*2 + 48 KB) instead of a fixed
@@ -55436,7 +55703,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     if (lv_indev_t* kp = lv_indev_drv_register(&s_nav_keypad_drv)) lv_indev_set_group(kp, s_nav_group);
     else pushDiagLine("LVGL nav keypad indev failed");
 #if defined(ESP32)
-#if defined(HAS_TANMATSU) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_TANMATSU) || defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV)
     s_kbd_nav = true;   // keyboard-only device: nav is always on (no touch to fall back to)
 #elif defined(ATTAKY_MESH_SERIES)
     // Soldered-on D-pad, and no settings row toggles it (the "Keyboard navigation"
@@ -55870,7 +56137,7 @@ void UITask::openMeshContactDm(uint32_t mesh_contact_index) {
     lv_obj_move_foreground(g_lv.dm.overlay);
   }
   refreshChatDetailAsync(g_lv.dm);   // AFTER un-hiding so bubbles measure correctly and the open-scroll reaches the newest message
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   // Physical keyboard: focus the composer on open so typing goes straight in.
   focusChatComposerOnOpen(&g_lv.dm);
 #endif
@@ -56468,6 +56735,13 @@ static inline void touchScreenBacklight(bool on) {
   // direct TFT_BL GPIO. Restore the saved level on wake and write zero on sleep.
   if (on) applyBrightness(s_brightness_pct);
   else    display.setBrightness(0);
+#elif defined(HAS_CARDPUTER_ADV)
+  if (on) {
+    display.turnOn();
+    applyBrightness(s_brightness_pct);
+  } else {
+    display.turnOff();
+  }
 #elif defined(HAS_TDISPLAY_P4)
   // T-Display P4: the RM69A10 AMOLED has no backlight pin — "brightness" is the panel's own DCS
   // 0x51 register. Off = 0 (blanks the AMOLED), on = restore the saved brightness. Without this
@@ -57330,7 +57604,7 @@ void UITask::notify(UIEventType t) {
   if (t == UIEventType::contactMessage || t == UIEventType::channelMessage || t == UIEventType::roomMessage)
     msgLedFlash();
 #endif
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   // Same idea on the T-Deck and M9 (no notification LED): wake the screen + briefly light the keyboard.
   if (touchPrefsGetMsgFlash() &&
       (t == UIEventType::contactMessage || t == UIEventType::channelMessage || t == UIEventType::roomMessage)) {
@@ -57421,6 +57695,17 @@ static bool sdRuntimeLifecycleBusy() {
 #endif
   return busy;
 }
+
+#if defined(HAS_CARDPUTER_ADV)
+[[noreturn]] static void cardputerSdFatal() {
+  Serial.println("[SD] Cardputer data card lost; restart required");
+  if (g_lv.task) {
+    g_lv.task->showAlert(TR("microSD data lost\nInsert the original card\nand restart"), 0x7FFFFFFFu);
+    lv_refr_now(nullptr);
+  }
+  for (;;) delay(1000);
+}
+#endif
 
 // Runtime SD wedge detect + recover. Some writer saw an SD write fail while the
 // card was supposedly mounted (sdNoteIoFailure) — verify with real I/O and,
@@ -57516,7 +57801,8 @@ static void sdHealthTick() {
 #endif
       markSdIo();
       if (g_lv.task) g_lv.task->showAlert(TR("SD card remounted"), 1800);
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
       // Land the RAM ring on the card promptly, not up to 30+ s later: every
       // message received while the card was out is only in RAM. Armed as an
       // OFF-THREAD flush — a synchronous write here froze the UI for >30 s on
@@ -57651,13 +57937,17 @@ static void sdHealthTick() {
     tileBackendSwapFinish();
     return;
   }
+#if defined(HAS_CARDPUTER_ADV)
+  cardputerSdFatal();
+#else
   fmSdUnmount();                  // SD.end() so a fresh begin re-runs the full card handshake
   if (fmSdTryMount()) {
 #if defined(TLORA_PAGER)
     s_sd_data_warn_next_ms = 0;
 #endif
     if (g_lv.task) g_lv.task->showAlert(TR("SD card remounted"), 1800);
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
     if (!s_ui_data_fs) uiDataFsReady();
     if (s_ui_data_fs == &SD) {
       SD.mkdir("/meshcomod");                          // fresh replacement card: recreate the data root
@@ -57678,6 +57968,7 @@ static void sdHealthTick() {
 #endif
     mapNoteStorageChanged();   // drop tiles read off the card that just went away
   }
+#endif
 }
 #endif
 
@@ -57718,6 +58009,17 @@ void UITask::loop() {
       // touch does in the UI. Otherwise the character you used to see the screen
       // ends up in the command you are typing.
       if (_screen_off) { tdeckKeyboardDiscardModifiers(); wakeScreen(); continue; }
+      consoleKey(key);
+    }
+#endif
+#if defined(HAS_CARDPUTER_KEYBOARD)
+    cardputerKeyboardPoll();
+    for (int kbi = 0; kbi < 12; ++kbi) {
+      int key = cardputerKeyboardReadKey();
+      if (key <= 0) break;
+      con_activity = true;
+      s_kb_last_key_ms = now;
+      if (_screen_off) { wakeScreen(); continue; }
       consoleKey(key);
     }
 #endif
@@ -58199,7 +58501,7 @@ void UITask::loop() {
     }
   }
 
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)   // notify-flash (and so the notify wake): T-Deck + M9
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
   // Notify-wake re-dim: a screen lit by a MESSAGE (not user input) goes dark again after a
   // short bounded window. On a busy channel the per-message wakes otherwise keep a static
   // image lit for the full screen-timeout — or forever at "never" — which retains into the
@@ -58216,7 +58518,7 @@ void UITask::loop() {
       _screen_off = true;
     }
   }
-#endif  // HAS_TDECK_KEYBOARD || HAS_M9_KEYBOARD (notify-wake re-dim)
+#endif  // physical-keyboard notify-wake re-dim
 
   // "At a glance" auto-hide: same re-dim shape as the msgflash window above,
   // but this feature's own fixed 5 s window (the last 200 ms of it spent
@@ -58370,7 +58672,8 @@ void UITask::loop() {
         // unmountable card spikes current / churns the bus and can reset the board.
         if (!sdRuntimeLifecycleBusy() && now >= s_sd_retry_after_ms && fmSdTryMount()) {
           showAlert(TR("SD card inserted"), 1500);
-#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || \
+  defined(HAS_CARDPUTER_ADV) || defined(HELTEC_LORA_V4_R8)
           if (!s_ui_data_fs) uiDataFsReady();
           if (s_ui_data_fs == &SD) {
             SD.mkdir("/meshcomod"); // fresh replacement card: recreate the data root
@@ -58387,6 +58690,9 @@ void UITask::loop() {
         // fire — neither a yanked card nor a wedged one was ever detected here.
         // Never probe/unmount while any SD consumer is active: SD.end() leaves
         // its open FAT handle stale and recovery would sabotage that operation.
+      #if defined(HAS_CARDPUTER_ADV)
+        cardputerSdFatal();
+      #else
         fmSdUnmount();
         mapNoteStorageChanged();
 #if defined(TLORA_PAGER)
@@ -58396,6 +58702,7 @@ void UITask::loop() {
         showAlert(TR("SD card removed"), 1500);
 #endif
         if (s_fm_fs == &SD || !s_fm_fs) fmShowRoots();
+#endif
       }
     }
   }
@@ -58688,6 +58995,22 @@ void UITask::loop() {
   }
   serviceLockscreen();
   serviceLockingCountdown(now);
+#elif defined(HAS_CARDPUTER_KEYBOARD)
+  uiCp("ui:navreb");
+  navMaybeRebuild();
+  uiCp("ui:kbpoll");
+  cardputerKeyboardPoll();
+  uiCp("ui:keys");
+  for (int kbi = 0; kbi < 12; ++kbi) {
+    int key = cardputerKeyboardReadKey();
+    if (key <= 0) break;
+    if (!_screen_off) s_kb_last_key_ms = now;
+    handleHwKey(key);
+  }
+  if (s_msgflash_wake) {
+    s_msgflash_wake = false;
+    if (_screen_off) { wakeScreen(); s_notify_wake_ms = millis(); }
+  }
 #endif
 #if defined(ATTAKY_MESH_SERIES)
   // POWER_BTN (AW9523 @0x59 P07) toggles the panel. Polled before the screen-off
@@ -58766,7 +59089,7 @@ void UITask::loop() {
     // gains/loses focus (the browser can't see the pixels to know).
     lv_obj_t* fta = g_lv.keyboard ? lv_keyboard_get_textarea(g_lv.keyboard) : nullptr;
     g_web_mirror.setKbFocused(fta != nullptr);
-#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD)
+#if defined(HAS_TDECK_KEYBOARD) || defined(HAS_M9_KEYBOARD) || defined(HAS_CARDPUTER_KEYBOARD)
     // Physical-keyboard boards hide the on-screen keyboard, so browser keystrokes are
     // injected via the same path as the hardware keys (printable chars type in; 0x08 =
     // backspace, 0x0D = enter/send).
@@ -58987,7 +59310,8 @@ void UITask::loop() {
   lv_timer_handler();
   uiCp("ui:tail");
 #if (CAP_SD || defined(TLORA_PAGER)) && \
-    (defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9))
+  (defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+  defined(HAS_THINKNODE_M9))
   sdRestoreRun();   // intentionally outside the LVGL event/render call stack
 #endif
 #if !defined(HAS_TANMATSU)

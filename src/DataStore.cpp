@@ -151,7 +151,9 @@ lfs_ssize_t _getLfsUsedBlockCount(FILESYSTEM* fs) {
 #endif
 
 uint32_t DataStore::getStorageUsedKb() const {
-#if defined(ESP32)
+#if defined(HAS_CARDPUTER_ADV)
+  return SD.usedBytes() / 1024;
+#elif defined(ESP32)
   return SPIFFS.usedBytes() / 1024;
 #elif defined(RP2040_PLATFORM)
   FSInfo info;
@@ -169,7 +171,9 @@ uint32_t DataStore::getStorageUsedKb() const {
 }
 
 uint32_t DataStore::getStorageTotalKb() const {
-#if defined(ESP32)
+#if defined(HAS_CARDPUTER_ADV)
+  return SD.totalBytes() / 1024;
+#elif defined(ESP32)
   return SPIFFS.totalBytes() / 1024;
 #elif defined(RP2040_PLATFORM)
   FSInfo info;
@@ -1127,9 +1131,12 @@ bool DataStore::deleteBlobByKey(const uint8_t key[], int key_len) {
 // Creates the folders, repoints _fs + the identity store, and sets the path
 // prefix so every subsequent read/write/exists/remove lands under /meshcomod.
 bool DataStore::useSdStorage() {
-  if (!SD.exists("/meshcomod"))          SD.mkdir("/meshcomod");
-  if (!SD.exists("/meshcomod/bl"))       SD.mkdir("/meshcomod/bl");
-  if (!SD.exists("/meshcomod/identity")) SD.mkdir("/meshcomod/identity");
+  auto ensure_dir = [](const char* path) {
+    return SD.exists(path) || (SD.mkdir(path) && SD.exists(path));
+  };
+  if (!ensure_dir("/meshcomod") ||
+      !ensure_dir("/meshcomod/bl") ||
+      !ensure_dir("/meshcomod/identity")) return false;
   strncpy(_root, "/meshcomod", sizeof(_root) - 1);
   _root[sizeof(_root) - 1] = '\0';
   _fs = &SD;

@@ -50,12 +50,17 @@ static uint32_t _atoi(const char* sp) {
   #include <LittleFS.h>
   DataStore store(LittleFS, rtc_clock);
 #elif defined(ESP32)
-  #include <SPIFFS.h>
+  #if defined(HAS_CARDPUTER_ADV)
+    #include <SD.h>
+  #else
+    #include <SPIFFS.h>
+  #endif
   #if defined(HAS_WIO_TRACKER_L2)
     #include <SD_MMC.h>
     #include <WioTrackerL2Io.h>
   #endif
-  #if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+  #if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+      defined(HAS_THINKNODE_M9) || defined(HAS_CARDPUTER_ADV)
     #include <SD.h>
     #include "SdFastClock.h"   // post-mount operating-clock raise (SD_SPI_FAST_HZ boards)
     #include <Preferences.h>
@@ -72,7 +77,11 @@ static uint32_t _atoi(const char* sp) {
   #endif
   extern "C" void set_boot_phase(int phase);
   namespace { struct MainBootTrace { MainBootTrace() { set_boot_phase(2); } } _main_boot_trace; }
-  DataStore store(SPIFFS, rtc_clock);
+  #if defined(HAS_CARDPUTER_ADV)
+    DataStore store(SD, rtc_clock);       // microSD is mandatory on this no-SPIFFS target
+  #else
+    DataStore store(SPIFFS, rtc_clock);
+  #endif
   #if defined(WIFI_SSID) || defined(MULTI_TRANSPORT_COMPANION)
     #include "WiFiConfig.h"
   #endif
@@ -269,7 +278,8 @@ extern volatile uint8_t g_wifi_last_disc_reason;
 
 #include "esp_task_wdt.h"   // task-watchdog reconfigure — see setup() (GH #56)
 
-#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+  defined(HAS_THINKNODE_M9)
 // ---- SPIFFS -> SD migration (fixes the beta_36 "lost my profile" upgrades) ----
 // Users who flipped "Store data on SD" before beta_36 ran with the toggle IGNORED
 // (the flag never survived a reboot), so their identity/prefs/contacts kept living
@@ -1010,6 +1020,67 @@ void setup() {
   #endif
     the_mesh.startInterface(serial_interface);
 #elif defined(ESP32)
+#if defined(HAS_CARDPUTER_ADV)
+  bool sd_storage = false;
+  SPIClass* cardputer_spi = cardputerSharedSPI();
+  bool cardputer_sd_mounted = false;
+  if (cardputer_spi) {
+    static const uint16_t kSettleMs[] = { 40, 180, 400 };
+    for (uint16_t settle_ms : kSettleMs) {
+      SD.end();
+      delay(settle_ms);
+      if (SD.begin(PIN_SD_CS, *cardputer_spi, 4000000, "/sd", 6) &&
+          SD.cardType() != CARD_NONE) {
+        cardputer_sd_mounted = true;
+        break;
+      }
+    }
+  }
+  if (cardputer_sd_mounted) {
+    sd_storage = store.useSdStorage();
+    if (sd_storage) {
+      static const char* kProbePath = "/meshcomod/.wadamesh-rw-test";
+      const uint32_t expected = 0x57414441u;
+      bool probe_ok = !SD.exists(kProbePath) || SD.remove(kProbePath);
+      File probe;
+      if (probe_ok) {
+        probe = SD.open(kProbePath, FILE_WRITE);
+        probe_ok = probe && probe.write((const uint8_t*)&expected, sizeof(expected)) == sizeof(expected);
+        if (probe) { probe.flush(); probe.close(); }
+      }
+      uint32_t actual = 0;
+      if (probe_ok) {
+        probe = SD.open(kProbePath, FILE_READ);
+        probe_ok = probe && probe.read((uint8_t*)&actual, sizeof(actual)) == sizeof(actual) &&
+                   actual == expected;
+        if (probe) probe.close();
+      }
+      const bool removed = SD.remove(kProbePath);
+      sd_storage = probe_ok && removed;
+    }
+  }
+  g_contacts_on_sd = sd_storage;
+  g_full_data_on_sd = sd_storage;
+  if (!sd_storage) {
+    Serial.println("[BOOT] FATAL: Cardputer requires a writable microSD");
+#ifdef DISPLAY_CLASS
+    if (disp) {
+      display.startFrame((ColorVal)0x0000);
+      display.setTextSize(1);
+      display.setColor((ColorVal)0xF800);
+      display.drawTextCentered(display.width() / 2, display.height() / 2 - 16,
+                               "microSD required");
+      display.setColor((ColorVal)0xFFFF);
+      display.drawTextCentered(display.width() / 2, display.height() / 2 + 2,
+                               "Use a writable FAT32 card");
+      display.drawTextCentered(display.width() / 2, display.height() / 2 + 16,
+                               "then restart");
+      display.endFrame();
+    }
+#endif
+    for (;;) delay(1000);
+  }
+#else
   // Storage selection. SPIFFS by default; use the SD card under /meshcomod when
   // SPIFFS is unavailable (e.g. installed under Launcher) OR the user opted in
   // ("Store data on SD"). The SD shares the LoRa SPI bus, already brought up by
@@ -1043,7 +1114,8 @@ void setup() {
     Serial.println("[BOOT] wio-l2 SD_MMC unavailable; using SPIFFS");
   }
 #endif
-#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+  defined(HAS_THINKNODE_M9)
   {
    #if defined(TLORA_PAGER)
     extern SPIClass* tloraPagerSharedSPI();    // display/radio/SD shared bus
@@ -1328,15 +1400,24 @@ void setup() {
   // exist, or deferred to a UI-driven action with a progress notice), and to
   // confirm on hardware that a cold first-format boot survives.
   if (!sd_storage && !spiffs_ok) SPIFFS.begin(true);   // last resort: format SPIFFS
+#endif
+#if defined(HAS_CARDPUTER_ADV)
+  Serial.println("[BOOT] storage: SD /meshcomod (required); UI settings: NVS");
+#else
   Serial.printf("[BOOT] storage: %s\n", sd_storage ? "SD /meshcomod" : "SPIFFS");
+#endif
 #if defined(ESP32_PLATFORM) && defined(HAS_TOUCH_UI)
   // Route touch settings + Wi-Fi creds to the active filesystem (SD when that's
   // the data store, else SPIFFS) instead of NVS. Old NVS values still load and
   // migrate on their next save, so this is a transparent in-place upgrade.
-  #if defined(HAS_WIO_TRACKER_L2)
+  #if defined(HAS_CARDPUTER_ADV)
+    // Keep UI/Wi-Fi settings in native NVS. Identity, contacts, channels and
+    // chat data live on the mandatory SD card under /meshcomod.
+  #elif defined(HAS_WIO_TRACKER_L2)
     SdNvsPrefs::useFile(sd_storage ? (fs::FS*)&SD_MMC : (fs::FS*)&SPIFFS,
                         sd_storage ? "/meshcomod" : "/prefs");
-  #elif defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+  #elif defined(HAS_TDECK_GT911) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || \
+        defined(HAS_THINKNODE_M9)
     SdNvsPrefs::useFile(sd_storage ? (fs::FS*)&SD : (fs::FS*)&SPIFFS,
                         sd_storage ? "/meshcomod" : "/prefs");
   #else

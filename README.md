@@ -8,7 +8,7 @@
 <p align="center"><b>A real touchscreen UI for your mesh radio.</b> &middot; open source &middot; GPL-3.0</p>
 
 Touch-UI [MeshCore](https://github.com/meshcore-dev/MeshCore) companion-radio
-firmware for the **LilyGo T-Deck / T-Deck Plus**, **Heltec V4 + TFT** and eight other boards
+firmware for the **LilyGo T-Deck / T-Deck Plus**, **Heltec V4 + TFT** and other boards
 (ESP32-S3).
 
 An LVGL touch UI — map, chat, contacts, channels, settings — split out of
@@ -29,6 +29,7 @@ per-board status.
 - Heltec V4-R8 + Expansion Kit V2 — env `heltec_v4_r8_tft_companion_radio_usb_tcp_touch` (beta)
 - LilyGo T-Display P4 — built from `tdisplay_p4/` (ESP-IDF); AMOLED by default, `WADA_P4_LCD=1` for the TFT-LCD SKU (beta)
 - Attaky Mesh Series — env `attaky_mesh_series_companion_radio_touch` (beta)
+- M5Stack Cardputer ADV + LoRa-1262 Cap — env `m5stack_cardputer_adv_companion_radio` (development) — [port notes](variants/m5stack_cardputer_adv/CARDPUTER_ADV_PORT.md)
 
 ## Architecture
 
@@ -54,8 +55,13 @@ automatically:
 ```bash
 pio run -e heltec_v4_tft_companion_radio_usb_tcp_touch   # Heltec V4 TFT
 pio run -e LilyGo_TDeck_companion_radio_touch            # LilyGo T-Deck
-# or just `pio run` to build both
+pio run -e m5stack_cardputer_adv_companion_radio         # Cardputer ADV + LoRa-1262 Cap
+# or just `pio run` to build the default PlatformIO targets
 ```
+
+The Cardputer target requires a FAT32 microSD card for its identity and mesh
+data. It has no SPIFFS fallback; see the port notes above for its no-PSRAM
+feature limits.
 
 Flash with the NVS-preserving 4-component chain (bootloader / partitions /
 boot_app0 / firmware at `0x0 / 0x8000 / 0xe000 / 0x10000`) so saved Wi-Fi
