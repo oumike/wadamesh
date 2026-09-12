@@ -830,6 +830,10 @@ static lv_font_t* s_emoji_font[3] = { nullptr, nullptr, nullptr };  // one per t
 // stays the Normal size at every level.
 static int s_ui_fscale = 100;
 static inline lv_coord_t SC(int px) { return (lv_coord_t)((px * s_ui_fscale + 50) / 100); }
+static inline lv_coord_t uiPagePad()  { return CAP_COMPACT_UI ? 4 : SC(10); }
+static inline lv_coord_t uiButtonH()  { return CAP_COMPACT_UI ? 26 : SC(34); }
+static inline lv_coord_t uiFieldH()   { return CAP_COMPACT_UI ? 28 : SC(34); }
+static inline lv_coord_t uiHeaderH()  { return CAP_COMPACT_UI ? 26 : SC(46); }
 // Popup-card dimension scaler: the 800×480 Tanmatsu panel dwarfs dialogs sized for the
 // 320px T-Deck/V4 — scale their fixed card/menu W/H up so they don't look lost in the middle.
 // No-op (plain SC) on the smaller boards, so their popups stay byte-for-byte unchanged.
@@ -881,7 +885,14 @@ static inline const lv_font_t* chatMessageFont() {
 }
 
 static void initTouchFontFallbacks() {
-#if defined(TLORA_PAGER)
+#if CAP_COMPACT_UI
+  // Keep text readable at native size, but compress the SC()-based geometry
+  // used throughout the shared touch UI to fit the 240x135 viewport.
+  s_ui_fscale = 82;
+  g_font_12 = lv_font_montserrat_12;
+  g_font_14 = lv_font_montserrat_14;
+  g_font_16 = lv_font_montserrat_16;
+#elif defined(TLORA_PAGER)
   // The Pager is wide but only 222 px tall. Grow the semantic text roles while
   // leaving SC() at 100%; globally scaling every row/card made content
   // unreachable. Layouts that need more room are bounded individually below.
@@ -1701,7 +1712,9 @@ static bool        s_apppage_slim  = false;
 // (settings title, inbox actions, open chat) reuse the two rows rather than doubling it.
 static inline lv_coord_t statusBarCurH() { return STATUSBAR_H; }
 #else
-static inline lv_coord_t statusBarCurH() { return s_statusbar_tall ? (lv_coord_t)(STATUSBAR_H * 2) : STATUSBAR_H; }
+static inline lv_coord_t statusBarCurH() {
+  return s_statusbar_tall && !CAP_COMPACT_UI ? (lv_coord_t)(STATUSBAR_H * 2) : STATUSBAR_H;
+}
 #endif
 static void statusBarSetTall(bool tall) {
   s_statusbar_tall = tall;
@@ -1877,7 +1890,9 @@ void luaHostSetSelectionGlow(lv_obj_t* obj, bool selected) {
 
 // ---- Chat overlay layout ----
 constexpr int CHAT_HDR_H       = 0;    // in-chat header bar removed; thread name shows in the status bar
-#if CAP_LARGE_SCREEN
+#if CAP_COMPACT_UI
+constexpr int CHAT_COMP_H      = 28;
+#elif CAP_LARGE_SCREEN
 constexpr int CHAT_COMP_H      = 64;   // big screen: ~2× the typing box (60px) + chrome
 #else
 constexpr int CHAT_COMP_H      = 34;   // composer row, single line (slimmed 50 → 40 → 34; hugs the 30px textbox)
@@ -1923,13 +1938,18 @@ static inline lv_coord_t tabContentH() { return lv_disp_get_ver_res(nullptr) - S
 // dark overlay covers everything and the card centers on-screen.
 static inline lv_coord_t modalAvailW() { return lv_disp_get_hor_res(nullptr) - 12; }
 static inline lv_coord_t modalAvailH() { return lv_disp_get_ver_res(nullptr) - STATUSBAR_H - 12; }
+static inline lv_coord_t modalCardH(lv_coord_t requested) {
+  return CAP_COMPACT_UI && requested > modalAvailH() ? modalAvailH() : requested;
+}
 // Chat-detail geometry — runtime so the conversation view fills the screen and
 // tracks rotation. The keyboard is half the screen tall in landscape (matches
 // kbApplyLayoutForRotation), full CHAT_KB_H in portrait.
 static inline bool       chatLandscape() { return lv_disp_get_hor_res(nullptr) > lv_disp_get_ver_res(nullptr); }
 static inline lv_coord_t chatScreenW()   { return lv_disp_get_hor_res(nullptr); }
 static inline lv_coord_t chatComposerChipSz() {
-#if CAP_LARGE_SCREEN
+#if CAP_COMPACT_UI
+  return 24;
+#elif CAP_LARGE_SCREEN
   return 56;
 #elif defined(TLORA_PAGER)
   return chatComposerBaseH() - 4;
@@ -1938,7 +1958,9 @@ static inline lv_coord_t chatComposerChipSz() {
 #endif
 }
 static inline lv_coord_t chatComposerSendSz() {
-#if defined(TLORA_PAGER)
+#if CAP_COMPACT_UI
+  return 28;
+#elif defined(TLORA_PAGER)
   return chatComposerChipSz();
 #else
   return 34;
@@ -4101,19 +4123,19 @@ static bool navHomeContains(lv_obj_t* obj) {
   return false;
 }
 
-static void navHomeFocus(lv_obj_t* target) {
-  if (!target || !lv_obj_is_valid(target) || lv_obj_has_flag(target, LV_OBJ_FLAG_HIDDEN)) return;
+static bool navHomeFocus(lv_obj_t* target) {
+  if (!target || !lv_obj_is_valid(target) || lv_obj_has_flag(target, LV_OBJ_FLAG_HIDDEN)) return false;
   s_nav_show = true;
   lv_group_focus_obj(target);
   if (g_lv.task) g_lv.task->noteUserInput();
+  return true;
 }
 
 static bool navHomeMove(lv_obj_t* current, int dir) {
   if (!navHomeContains(current)) return false;
   const int slot = navHomeRightIndex(current);
   if (dir == NAV_LEFT) {
-    navHomeFocus(g_lv.home_unread);
-    return true;
+    return navHomeFocus(g_lv.home_unread);
   }
   if (slot >= 0) {
     if (dir == NAV_UP || dir == NAV_DOWN) {
@@ -4121,15 +4143,13 @@ static bool navHomeMove(lv_obj_t* current, int dir) {
       for (int next = slot + step; next >= 0 && next < HOME_NAV_COUNT; next += step) {
         lv_obj_t* target = s_home_nav_right[next];
         if (!target || !lv_obj_is_valid(target) || lv_obj_has_flag(target, LV_OBJ_FLAG_HIDDEN)) continue;
-        navHomeFocus(target);
-        break;
+        return navHomeFocus(target);
       }
     }
-    return true;
+    return false;
   }
   if (dir == NAV_RIGHT) {
-    navHomeFocus(s_home_nav_right[HOME_NAV_ADVERT]);
-    return true;
+    return navHomeFocus(s_home_nav_right[HOME_NAV_ADVERT]);
   }
   return false;
 }
@@ -10052,8 +10072,8 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
     // Leave a right gutter for the page scrollbar (6 px bar + 2 px pad): the grouped
     // card + its wide buttons used to run under the scrollbar. 8 px left margin, 14 px
     // right (the extra 6 clears the bar) — close enough to centred, scrollbar-clear.
-    const lv_coord_t card_w    = lv_disp_get_hor_res(nullptr) - 22;
-    const lv_coord_t card_pad  = 8;
+    const lv_coord_t card_w    = lv_disp_get_hor_res(nullptr) - (CAP_COMPACT_UI ? 12 : 22);
+    const lv_coord_t card_pad  = CAP_COMPACT_UI ? 4 : 8;
     const lv_coord_t content_w = card_w - card_pad * 2;
 
     lv_obj_t* wrap = lv_obj_create(s_settings_inline_parent);
@@ -10061,7 +10081,7 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
     lv_obj_set_width(wrap, card_w);
     lv_obj_set_height(wrap, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_all(wrap, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(wrap, 14, LV_PART_MAIN);   // gap between cards
+    lv_obj_set_style_pad_bottom(wrap, CAP_COMPACT_UI ? 6 : 14, LV_PART_MAIN);   // gap between cards
     lv_obj_set_flex_flow(wrap, LV_FLEX_FLOW_COLUMN);
     lv_obj_clear_flag(wrap, LV_OBJ_FLAG_SCROLLABLE);
     if (title && title[0]) {
@@ -10069,8 +10089,8 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
       lv_label_set_text(h, TR(title));
       lv_obj_set_style_text_font(h, &g_font_12, LV_PART_MAIN);
       lv_obj_set_style_text_color(h, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
-      lv_obj_set_style_pad_left(h, 4, LV_PART_MAIN);
-      lv_obj_set_style_pad_bottom(h, 4, LV_PART_MAIN);
+      lv_obj_set_style_pad_left(h, CAP_COMPACT_UI ? 2 : 4, LV_PART_MAIN);
+      lv_obj_set_style_pad_bottom(h, CAP_COMPACT_UI ? 2 : 4, LV_PART_MAIN);
     }
     lv_obj_t* card = lv_obj_create(wrap);
     lv_obj_remove_style_all(card);
@@ -10078,7 +10098,7 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
     lv_obj_set_height(card, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_RAISED), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(card, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, CAP_COMPACT_UI ? 6 : 10, LV_PART_MAIN);
     lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(card, lv_color_hex(themeRole(0x2A2E34, COLOR_BORDER)), LV_PART_MAIN);
     lv_obj_set_style_pad_all(card, card_pad, LV_PART_MAIN);
@@ -10093,11 +10113,11 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
     // small x-offset, so they'd resolve to the FULL content width and spill 1-2 px past
     // the right edge (clipped → "cut off" buttons). The pad shrinks the percent-resolve
     // width; s_settings_content_w (explicit-width controls) is matched to it.
-    lv_obj_set_style_pad_right(content, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(content, CAP_COMPACT_UI ? 3 : 6, LV_PART_MAIN);
     lv_obj_set_style_border_width(content, 0, LV_PART_MAIN);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     (void)kind;
-    s_settings_content_w = content_w - 6;
+    s_settings_content_w = content_w - (CAP_COMPACT_UI ? 3 : 6);
     return content;
   }
   closeSettingsModal();
@@ -10119,7 +10139,8 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
 
   lv_obj_t* header = lv_obj_create(root);
   lv_obj_remove_style_all(header);
-  lv_obj_set_size(header, sw, SC(46));
+  const lv_coord_t header_h = uiHeaderH();
+  lv_obj_set_size(header, sw, header_h);
   lv_obj_set_pos(header, 0, 0);
   styleSurface(header, COLOR_PANEL, 0);
   lv_obj_set_style_pad_all(header, 0, LV_PART_MAIN);
@@ -10131,12 +10152,12 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
   lv_obj_t* lbl = lv_label_create(header);
   lv_label_set_text(lbl, TR(title));
   lv_obj_set_style_text_color(lbl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
-  lv_obj_set_style_text_font(lbl, &g_font_14, LV_PART_MAIN);
-  lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 8, 0);
+  lv_obj_set_style_text_font(lbl, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
+  lv_obj_align(lbl, LV_ALIGN_LEFT_MID, CAP_COMPACT_UI ? 5 : 8, 0);
 
   lv_obj_t* close_btn = lv_btn_create(header);
-  lv_obj_set_size(close_btn, SC(58), SC(32));
-  lv_obj_align(close_btn, LV_ALIGN_RIGHT_MID, -6, 0);
+  lv_obj_set_size(close_btn, CAP_COMPACT_UI ? 26 : SC(58), CAP_COMPACT_UI ? 22 : SC(32));
+  lv_obj_align(close_btn, LV_ALIGN_RIGHT_MID, CAP_COMPACT_UI ? -3 : -6, 0);
   styleButton(close_btn);
   lv_obj_add_event_cb(close_btn, settingsCloseCb, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* close_lbl = lv_label_create(close_btn);
@@ -10145,16 +10166,22 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
   { char _cb[40]; snprintf(_cb, sizeof _cb, LV_SYMBOL_CLOSE "  %s", TR("Close")); lv_label_set_text(close_lbl, _cb);
     lv_obj_set_style_text_color(close_lbl, lv_color_hex(0xE05544), LV_PART_MAIN); }   // red ✕
 #else
-  lv_label_set_text(close_lbl, TR("Close"));
+  lv_label_set_text(close_lbl, CAP_COMPACT_UI ? LV_SYMBOL_CLOSE : TR("Close"));
 #endif
+  lv_obj_set_style_text_font(close_lbl, CAP_COMPACT_UI ? &g_font_12 : uiChromeFont(), LV_PART_MAIN);
   lv_obj_center(close_lbl);
 
   lv_obj_t* body = lv_obj_create(root);
   lv_obj_remove_style_all(body);
-  lv_obj_set_size(body, sw - 8, sh - SC(52));   // clears the SC-scaled header
-  lv_obj_set_pos(body, 4, SC(48));
+  if (CAP_COMPACT_UI) {
+    lv_obj_set_size(body, sw - 4, sh - STATUSBAR_H - header_h - 2);
+    lv_obj_set_pos(body, 2, header_h + 1);
+  } else {
+    lv_obj_set_size(body, sw - 8, sh - SC(52));   // clears the SC-scaled header
+    lv_obj_set_pos(body, 4, SC(48));
+  }
   styleSurface(body, COLOR_BG, 0);
-  lv_obj_set_style_pad_all(body, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(body, CAP_COMPACT_UI ? 3 : 6, LV_PART_MAIN);
   lv_obj_set_style_border_width(body, 0, LV_PART_MAIN);
   lv_obj_set_scroll_dir(body, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_AUTO);
@@ -10172,14 +10199,16 @@ static lv_obj_t* createSettingsModal(const char* title, SettingsModalKind kind) 
   lv_obj_set_height(content, LV_SIZE_CONTENT);
   lv_obj_set_pos(content, 0, 0);
   lv_obj_set_style_pad_all(content, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_right(content, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(content, CAP_COMPACT_UI ? 3 : 6, LV_PART_MAIN);
   lv_obj_set_style_border_width(content, 0, LV_PART_MAIN);
   lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
   resetSettingsModalState();
   g_set_modal.root = root;
   g_set_modal.kind = kind;
-  s_settings_content_w = (sw - 8) - 12 - 6;   // body content width minus the right control gutter
+  s_settings_content_w = CAP_COMPACT_UI
+      ? (sw - 4) - 6 - 3
+      : (sw - 8) - 12 - 6;   // body content width minus the right control gutter
 #if CAP_KEYBOARD && CAP_KEYPAD_NAV
   // Physical keyboard: once the caller has finished adding this modal's fields
   // (deferred to the next frame), focus its first text field so the user can
@@ -10817,7 +10846,7 @@ static void openDiscoveredSettingsSheetCb(lv_event_t* e) {
 #if defined(HAS_TANMATSU)
   const int card_w = PCW(220);
 #else
-  const int card_w = 220;
+  const int card_w = CAP_COMPACT_UI ? modalAvailW() : 220;
 #endif
   lv_obj_t* card = lv_obj_create(s_disc_settings_root);
   lv_obj_remove_style_all(card);
@@ -10838,7 +10867,7 @@ static void openDiscoveredSettingsSheetCb(lv_event_t* e) {
   lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 12, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 12, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t* title = lv_label_create(card);
@@ -10851,9 +10880,9 @@ static void openDiscoveredSettingsSheetCb(lv_event_t* e) {
   lv_label_set_text(lbl, TR("Auto-delete oldest"));
   lv_obj_set_style_text_color(lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   lv_obj_set_style_text_font(lbl, &g_font_12, LV_PART_MAIN);
-  lv_obj_set_pos(lbl, 0, 36);
+  lv_obj_set_pos(lbl, 0, CAP_COMPACT_UI ? 22 : 36);
   lv_obj_t* sw_e = lv_switch_create(card);
-  lv_obj_align(sw_e, LV_ALIGN_TOP_RIGHT, 0, 30);
+  lv_obj_align(sw_e, LV_ALIGN_TOP_RIGHT, 0, CAP_COMPACT_UI ? 15 : 30);
 #if defined(ESP32)
   if (touchPrefsGetDiscoveredAutoEvict()) lv_obj_add_state(sw_e, LV_STATE_CHECKED);
   lv_obj_add_event_cb(sw_e, discAutoEvictToggleCb, LV_EVENT_VALUE_CHANGED, nullptr);
@@ -10865,10 +10894,11 @@ static void openDiscoveredSettingsSheetCb(lv_event_t* e) {
   lv_label_set_text(hlbl, TR("Auto-delete above hops"));
   lv_obj_set_style_text_color(hlbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   lv_obj_set_style_text_font(hlbl, &g_font_12, LV_PART_MAIN);
-  lv_obj_set_pos(hlbl, 0, 80);
+  lv_obj_set_pos(hlbl, 0, CAP_COMPACT_UI ? 50 : 80);
   lv_obj_t* hop_ta = lv_textarea_create(card);
-  lv_obj_set_size(hop_ta, SC(48), SC(32));
-  lv_obj_align(hop_ta, LV_ALIGN_TOP_RIGHT, 0, 72);
+  lv_obj_set_size(hop_ta, CAP_COMPACT_UI ? 42 : SC(48),
+                  CAP_COMPACT_UI ? 26 : SC(32));
+  lv_obj_align(hop_ta, LV_ALIGN_TOP_RIGHT, 0, CAP_COMPACT_UI ? 42 : 72);
   lv_textarea_set_one_line(hop_ta, true);
   lv_textarea_set_max_length(hop_ta, 2);
   lv_textarea_set_accepted_chars(hop_ta, "0123456789");
@@ -10880,6 +10910,7 @@ static void openDiscoveredSettingsSheetCb(lv_event_t* e) {
   lv_obj_add_event_cb(hop_ta, discHopsChangedCb, LV_EVENT_VALUE_CHANGED, nullptr);
 #endif
 
+#if !CAP_COMPACT_UI
   lv_obj_t* hint = lv_label_create(card);
   lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(hint, card_w - 24);
@@ -10889,6 +10920,7 @@ static void openDiscoveredSettingsSheetCb(lv_event_t* e) {
   lv_obj_set_style_text_color(hint, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   lv_obj_set_style_text_font(hint, &g_font_12, LV_PART_MAIN);
   lv_obj_set_pos(hint, 0, 116);
+#endif
 }
 
 static void openDiscoveredModalCb(lv_event_t* e) {
@@ -11185,8 +11217,8 @@ static int settingsRowLabel(lv_obj_t* body, int y, int y_off, const char* text,
   // "Közösségi profil" came out "K□z□ss□gi profil" while the title bar beside it
   // was fine, because that one sets &g_font_16 explicitly. g_font_14 is the same
   // typeface and metrics, plus the accent/Greek/Cyrillic/Arabic fallbacks.
-  lv_obj_set_style_text_font(l, font ? font : &g_font_14, LV_PART_MAIN);
-  lv_obj_set_pos(l, 2, y + y_off);
+  lv_obj_set_style_text_font(l, font ? font : (CAP_COMPACT_UI ? &g_font_12 : &g_font_14), LV_PART_MAIN);
+  lv_obj_set_pos(l, CAP_COMPACT_UI ? 0 : 2, y + y_off);
   lv_obj_update_layout(l);
   return lv_obj_get_height(l);
 }
@@ -17071,21 +17103,21 @@ static void openContactsSearchSheetCb(lv_event_t* e) {
 
 #if CAP_LARGE_SCREEN
   const int card_w = PCW(220);
-  const int card_h = PSC(130);
+  const int card_h = modalCardH(PSC(130));
 #else
-  const int card_w = 220;
-  const int card_h = 130;
+  const int card_w = CAP_COMPACT_UI ? modalAvailW() : 220;
+  const int card_h = modalCardH(130);
 #endif
   lv_obj_t* card = lv_obj_create(s_contacts_search_sheet);
   lv_obj_remove_style_all(card);
   lv_obj_set_size(card, card_w, card_h);
-  lv_obj_align(card, LV_ALIGN_CENTER, 0, -40);
+  lv_obj_align(card, LV_ALIGN_CENTER, 0, CAP_COMPACT_UI ? 0 : -40);
   lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 10, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   addCloseXBadge(card, contactsSearchSheetCloseCb);
 
@@ -17096,7 +17128,8 @@ static void openContactsSearchSheetCb(lv_event_t* e) {
   lv_obj_set_pos(title, 0, 0);
 
   s_contacts_search_ta = lv_textarea_create(card);
-  lv_obj_set_size(s_contacts_search_ta, card_w - 20, PSC(34));
+  lv_obj_set_size(s_contacts_search_ta, card_w - (CAP_COMPACT_UI ? 8 : 20),
+                  CAP_COMPACT_UI ? uiFieldH() : PSC(34));
   lv_obj_set_pos(s_contacts_search_ta, 0, PSC(28));
   styleCard(s_contacts_search_ta);
   lv_textarea_set_one_line(s_contacts_search_ta, true);
@@ -17119,7 +17152,8 @@ static void openContactsSearchSheetCb(lv_event_t* e) {
 #endif
 
   lv_obj_t* clear_btn = lv_btn_create(card);
-  lv_obj_set_size(clear_btn, PSC(88), PSC(34));
+  lv_obj_set_size(clear_btn, CAP_COMPACT_UI ? 74 : PSC(88),
+                  CAP_COMPACT_UI ? uiButtonH() : PSC(34));
   lv_obj_set_pos(clear_btn, 0, PSC(70));
   styleButton(clear_btn);
   lv_obj_add_event_cb(clear_btn, contactsSearchClearCb, LV_EVENT_CLICKED, nullptr);
@@ -17129,8 +17163,9 @@ static void openContactsSearchSheetCb(lv_event_t* e) {
   lv_obj_center(cl);
 
   lv_obj_t* apply_btn = lv_btn_create(card);
-  lv_obj_set_size(apply_btn, PSC(110), PSC(34));
-  lv_obj_set_pos(apply_btn, card_w - 20 - PSC(110), PSC(70));
+  lv_obj_set_size(apply_btn, CAP_COMPACT_UI ? 90 : PSC(110),
+                  CAP_COMPACT_UI ? uiButtonH() : PSC(34));
+  lv_obj_set_pos(apply_btn, card_w - (CAP_COMPACT_UI ? 8 + 90 : 20 + PSC(110)), PSC(70));
   styleButton(apply_btn);
   lv_obj_set_style_bg_color(apply_btn, lv_color_hex(COLOR_STATUS_OK), LV_PART_MAIN);
   lv_obj_set_style_text_color(apply_btn, lv_color_hex(COLOR_ON_STATUS_OK), LV_PART_MAIN);
@@ -19653,17 +19688,18 @@ static void openAddChannelSheet() {
   lv_obj_move_foreground(s_addch_sheet);
   lv_obj_add_event_cb(s_addch_sheet, addChannelSheetDismissCb, LV_EVENT_CLICKED, nullptr);
 
-  const int rows  = 4;
-  const int pad   = PSC(10);
-  const int hdr_h = PSC(36);
-  const int row_gap = PSC(6);
+  const int cols  = CAP_COMPACT_UI ? 2 : 1;
+  const int rows  = (4 + cols - 1) / cols;
+  const int pad   = CAP_COMPACT_UI ? 4 : PSC(10);
+  const int hdr_h = CAP_COMPACT_UI ? 20 : PSC(36);
+  const int row_gap = CAP_COMPACT_UI ? 3 : PSC(6);
   // Shrink the button height if the four rows + header won't fit the (shorter)
   // landscape viewport, so the card never runs off-screen. Bigger on the Tanmatsu.
-  int btn_h = PSC(38);
+  int btn_h = CAP_COMPACT_UI ? 34 : PSC(38);
   if (hdr_h + rows * (btn_h + row_gap) + pad > modalAvailH())
     btn_h = ((modalAvailH() - hdr_h - pad) / rows) - row_gap;
   if (btn_h < PSC(26)) btn_h = PSC(26);
-  int card_w = PCW(220);
+  int card_w = CAP_COMPACT_UI ? modalAvailW() : PCW(220);
   if (card_w > modalAvailW()) card_w = modalAvailW();
   const int card_h = hdr_h + rows * (btn_h + row_gap) + pad;
   lv_obj_t* card = lv_obj_create(s_addch_sheet);
@@ -19672,7 +19708,7 @@ static void openAddChannelSheet() {
   lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
   lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
+  lv_obj_set_style_radius(card, CAP_COMPACT_UI ? 6 : 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
   lv_obj_set_style_pad_all(card, pad, LV_PART_MAIN);
@@ -19685,18 +19721,26 @@ static void openAddChannelSheet() {
   lv_obj_set_style_text_font(title, &g_font_14, LV_PART_MAIN);
   lv_obj_set_pos(title, 0, 0);
 
-  int y = PSC(28);
+  const int body_y = CAP_COMPACT_UI ? 18 : PSC(28);
+  const int col_gap = CAP_COMPACT_UI ? 3 : 0;
+  const int button_w = (card_w - 2 * pad - (cols - 1) * col_gap) / cols;
+  int item = 0;
   auto mk = [&](const char* label, lv_event_cb_t cb) {
     lv_obj_t* b = lv_btn_create(card);
-    lv_obj_set_size(b, card_w - 2 * pad, btn_h);
-    lv_obj_set_pos(b, 0, y);
+    const int col = item % cols;
+    const int row = item / cols;
+    lv_obj_set_size(b, button_w, btn_h);
+    lv_obj_set_pos(b, col * (button_w + col_gap), body_y + row * (btn_h + row_gap));
     styleButton(b);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* l = lv_label_create(b);
     lv_label_set_text(l, TR(label));
-    lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, button_w - 8);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
     lv_obj_center(l);
-    y += btn_h + row_gap;
+    item++;
   };
   mk(TR("Create a private channel"), addChannelCreatePrivateCb);
   mk(TR("Join a private channel"), addChannelJoinPrivateCb);
@@ -19808,7 +19852,11 @@ static void openShareMyContactPopup() {
   // off the shorter landscape screen.
   int card_w;
   int card_h;
-#if defined(TLORA_PAGER)
+#if CAP_COMPACT_UI
+  card_w = modalAvailW();
+  card_h = modalAvailH();
+  int qr_size = card_h - 30;
+#elif defined(TLORA_PAGER)
   // The Pager is very wide and very short. Use that width instead of squeezing
   // a portrait card into the middle: QR on the left, identity prefix on the
   // right, with a single title row across the top.
@@ -19825,7 +19873,7 @@ static void openShareMyContactPopup() {
 #endif
   if (qr_size > PSC(160)) qr_size = PSC(160);   // bigger QR on the Tanmatsu panel
   if (qr_size > card_w - 20) qr_size = card_w - 20;
-  if (qr_size < 96) qr_size = 96;
+  if (qr_size < (CAP_COMPACT_UI ? 64 : 96)) qr_size = CAP_COMPACT_UI ? 64 : 96;
   lv_obj_t* card = lv_obj_create(s_share_my_root);
   lv_obj_remove_style_all(card);
   lv_obj_set_size(card, card_w, card_h);
@@ -19835,7 +19883,7 @@ static void openShareMyContactPopup() {
   lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 10, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   addCloseXBadge(card, shareMyContactBackdropCb);
 
@@ -19844,10 +19892,11 @@ static void openShareMyContactPopup() {
   lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
   // Constrain both dimensions: LONG_DOT with only a width can wrap to a second
   // line, which puts a long node name on top of the QR.
-  lv_obj_set_size(title, card_w - 20 - 32, lv_font_get_line_height(&g_font_14));
+  lv_obj_set_size(title, card_w - (CAP_COMPACT_UI ? 8 : 20) - 32,
+                  lv_font_get_line_height(CAP_COMPACT_UI ? &g_font_12 : &g_font_14));
   lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &g_font_14, LV_PART_MAIN);
-  lv_obj_set_pos(title, 0, 4);
+  lv_obj_set_style_text_font(title, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
+  lv_obj_set_pos(title, 0, CAP_COMPACT_UI ? 0 : 4);
 
   // QR widget — 160 px in a 220 px card with 10 px padding leaves 20 px
   // gutters left/right. Dark = pure black, light = white-ish; LVGL needs
@@ -19856,7 +19905,9 @@ static void openShareMyContactPopup() {
                                   lv_color_hex(0x000000),
                                   lv_color_hex(0xFFFFFF));
   lv_qrcode_update(qr, payload, strlen(payload));
-#if defined(TLORA_PAGER)
+#if CAP_COMPACT_UI
+  lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, 18);
+#elif defined(TLORA_PAGER)
   lv_obj_align(qr, LV_ALIGN_TOP_LEFT, 0, 32);
 #else
   lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, 32);
@@ -19864,13 +19915,14 @@ static void openShareMyContactPopup() {
   // White frame around the QR so the camera-side QR detector doesn't get
   // confused by the dark card bleeding into the quiet zone.
   lv_obj_set_style_border_color(qr, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_border_width(qr, 4, LV_PART_MAIN);
+  lv_obj_set_style_border_width(qr, CAP_COMPACT_UI ? 2 : 4, LV_PART_MAIN);
 
   // Short pubkey prefix below the QR — quick visual check that two
   // devices show the same identity.
   char prefix_buf[24];
   snprintf(prefix_buf, sizeof(prefix_buf), "%02X%02X%02X%02X%02X%02X",
            pub[0], pub[1], pub[2], pub[3], pub[4], pub[5]);
+#if !CAP_COMPACT_UI
   lv_obj_t* hex_lbl = lv_label_create(card);
   lv_label_set_text(hex_lbl, prefix_buf);
   lv_obj_set_style_text_color(hex_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
@@ -19884,6 +19936,7 @@ static void openShareMyContactPopup() {
   // Anchor under the QR (not the card bottom) so it can't ride up onto the
   // code when the QR shrinks in landscape.
   lv_obj_align_to(hex_lbl, qr, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
+#endif
 #endif
 }
 
@@ -20928,12 +20981,12 @@ static lv_obj_t* openFullscreenView(const char* title) {
   lv_obj_remove_style_all(body);
   lv_obj_set_size(body, sw, sh - STATUSBAR_H);
   lv_obj_set_pos(body, 0, 0);
-  lv_obj_set_style_pad_all(body, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(body, CAP_COMPACT_UI ? 3 : 6, LV_PART_MAIN);
 
   // Home button floats as a small overlay over the top-right of the body.
   lv_obj_t* home = lv_btn_create(s_fullscreen_view);
-  lv_obj_set_size(home, 40, 28);
-  lv_obj_align(home, LV_ALIGN_TOP_RIGHT, -6, 4);
+  lv_obj_set_size(home, CAP_COMPACT_UI ? 28 : 40, CAP_COMPACT_UI ? 22 : 28);
+  lv_obj_align(home, LV_ALIGN_TOP_RIGHT, CAP_COMPACT_UI ? -3 : -6, CAP_COMPACT_UI ? 2 : 4);
   styleButton(home);
 #if !defined(HAS_TANMATSU)
   if (s_theme_day) {
@@ -21622,8 +21675,8 @@ static void openTermCmdPicker() {
     closeTermCmdPicker();
   }, LV_EVENT_CLICKED, nullptr);
 
-  const int card_w = sw - 20;
-  const int card_h = (sh - STATUSBAR_H) - 40;
+  const int card_w = sw - (CAP_COMPACT_UI ? 8 : 20);
+  const int card_h = (sh - STATUSBAR_H) - (CAP_COMPACT_UI ? 8 : 40);
   lv_obj_t* card = lv_obj_create(s_term_picker_root);
   lv_obj_remove_style_all(card);
   lv_obj_set_size(card, card_w, card_h);
@@ -21633,7 +21686,7 @@ static void openTermCmdPicker() {
   lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 3 : 6, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t* title = lv_label_create(card);
@@ -21648,8 +21701,9 @@ static void openTermCmdPicker() {
   });
 
   lv_obj_t* list = lv_list_create(card);
-  lv_obj_set_size(list, card_w - 12, card_h - 12 - 28);
-  lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 28);
+  lv_obj_set_size(list, card_w - (CAP_COMPACT_UI ? 6 : 12),
+                  card_h - (CAP_COMPACT_UI ? 6 : 12) - (CAP_COMPACT_UI ? 22 : 28));
+  lv_obj_align(list, LV_ALIGN_TOP_MID, 0, CAP_COMPACT_UI ? 22 : 28);
   lv_obj_set_style_bg_color(list, lv_color_hex(COLOR_BG), LV_PART_MAIN);
   lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
@@ -21701,7 +21755,7 @@ static void buildTerminal(lv_obj_t* body) {
   lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
   const lv_coord_t bw = lv_disp_get_hor_res(nullptr);
   const lv_coord_t bh = (lv_disp_get_ver_res(nullptr) - STATUSBAR_H);  // body fills the view
-  const lv_coord_t row_h = 40;
+  const lv_coord_t row_h = CAP_COMPACT_UI ? 30 : 40;
 
   s_term_log_box = lv_obj_create(body);
   lv_obj_remove_style_all(s_term_log_box);
@@ -21710,7 +21764,7 @@ static void buildTerminal(lv_obj_t* body) {
   styleSurface(s_term_log_box, 0x0A0B0C, 6);
   lv_obj_set_style_border_color(s_term_log_box, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(s_term_log_box, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(s_term_log_box, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_term_log_box, CAP_COMPACT_UI ? 3 : 6, LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_term_log_box, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(s_term_log_box, LV_SCROLLBAR_MODE_AUTO);
   // Stack each log line as its own coloured label.
@@ -21728,7 +21782,8 @@ static void buildTerminal(lv_obj_t* body) {
   lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t* picker_btn = lv_btn_create(row);
-  lv_obj_set_size(picker_btn, 32, 32);
+  const lv_coord_t term_control_h = CAP_COMPACT_UI ? 26 : 32;
+  lv_obj_set_size(picker_btn, term_control_h, term_control_h);
   lv_obj_align(picker_btn, LV_ALIGN_LEFT_MID, 4, 0);
   styleButton(picker_btn);
   lv_obj_set_style_bg_color(picker_btn, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN);
@@ -21743,8 +21798,8 @@ static void buildTerminal(lv_obj_t* body) {
   lv_obj_center(picker_lbl);
 
   s_term_input_ta = lv_textarea_create(row);
-  lv_obj_set_size(s_term_input_ta, bw - 104, 32);
-  lv_obj_align(s_term_input_ta, LV_ALIGN_LEFT_MID, 40, 0);
+  lv_obj_set_size(s_term_input_ta, bw - (CAP_COMPACT_UI ? 88 : 104), term_control_h);
+  lv_obj_align(s_term_input_ta, LV_ALIGN_LEFT_MID, CAP_COMPACT_UI ? 34 : 40, 0);
   styleCard(s_term_input_ta);
   lv_textarea_set_one_line(s_term_input_ta, true);
   lv_textarea_set_max_length(s_term_input_ta, 96);
@@ -21754,7 +21809,7 @@ static void buildTerminal(lv_obj_t* body) {
   attachSettingsTaEvents(s_term_input_ta);
 
   lv_obj_t* send_btn = lv_btn_create(row);
-  lv_obj_set_size(send_btn, 56, 32);
+  lv_obj_set_size(send_btn, CAP_COMPACT_UI ? 46 : 56, term_control_h);
   lv_obj_align(send_btn, LV_ALIGN_RIGHT_MID, -4, 0);
   styleButton(send_btn);
   lv_obj_set_style_bg_color(send_btn, lv_color_hex(COLOR_STATUS_OK), LV_PART_MAIN);
@@ -22374,12 +22429,13 @@ static void fmTextPrompt(const char* title, const char* initial, void (*cb)(cons
 
   lv_obj_t* card = lv_obj_create(s_fm_prompt);
   lv_obj_remove_style_all(card);
-  lv_obj_set_size(card, sw - 30, 124);
-  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, 8);
-  styleSurface(card, COLOR_PANEL, 10);
+  lv_obj_set_size(card, sw - (CAP_COMPACT_UI ? 8 : 30), modalCardH(124));
+  lv_obj_align(card, CAP_COMPACT_UI ? LV_ALIGN_CENTER : LV_ALIGN_TOP_MID, 0,
+               CAP_COMPACT_UI ? 0 : 8);
+  styleSurface(card, COLOR_PANEL, CAP_COMPACT_UI ? 6 : 10);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(themeRole(0x2A2E33, COLOR_BORDER)), LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 10, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t* tl = lv_label_create(card);
@@ -22389,7 +22445,8 @@ static void fmTextPrompt(const char* title, const char* initial, void (*cb)(cons
   lv_obj_align(tl, LV_ALIGN_TOP_LEFT, 2, 0);
 
   s_fm_prompt_ta = lv_textarea_create(card);
-  lv_obj_set_size(s_fm_prompt_ta, sw - 30 - 20, 32);
+  lv_obj_set_size(s_fm_prompt_ta, sw - (CAP_COMPACT_UI ? 16 : 50),
+                  CAP_COMPACT_UI ? uiFieldH() : 32);
   lv_obj_align(s_fm_prompt_ta, LV_ALIGN_TOP_MID, 0, 24);
   styleCard(s_fm_prompt_ta);
   lv_textarea_set_one_line(s_fm_prompt_ta, true);
@@ -22400,7 +22457,7 @@ static void fmTextPrompt(const char* title, const char* initial, void (*cb)(cons
   attachSettingsTaEvents(s_fm_prompt_ta);
 
   lv_obj_t* bc = lv_btn_create(card);
-  lv_obj_set_size(bc, 80, 32);
+  lv_obj_set_size(bc, CAP_COMPACT_UI ? 72 : 80, CAP_COMPACT_UI ? uiButtonH() : 32);
   lv_obj_align(bc, LV_ALIGN_BOTTOM_LEFT, 0, 0);
   styleButton(bc);
   lv_obj_set_style_bg_color(bc, lv_color_hex(COLOR_SECONDARY_ACTION), LV_PART_MAIN);
@@ -22409,7 +22466,7 @@ static void fmTextPrompt(const char* title, const char* initial, void (*cb)(cons
   useChainedFont(lc);
 
   lv_obj_t* bo = lv_btn_create(card);
-  lv_obj_set_size(bo, 80, 32);
+  lv_obj_set_size(bo, CAP_COMPACT_UI ? 72 : 80, CAP_COMPACT_UI ? uiButtonH() : 32);
   lv_obj_align(bo, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
   styleButton(bo);
   lv_obj_set_style_bg_color(bo, lv_color_hex(COLOR_STATUS_OK), LV_PART_MAIN);
@@ -23649,12 +23706,15 @@ static void buildFileManager(lv_obj_t* body) {
   lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
   const lv_coord_t bw = lv_disp_get_hor_res(nullptr);
   const lv_coord_t bh = (lv_disp_get_ver_res(nullptr) - STATUSBAR_H);
-  const lv_coord_t HDR_H = 34, BTN_W = 38, BTN_H = 28, HOME_RES = 48;
+  const lv_coord_t HDR_H = CAP_COMPACT_UI ? 28 : 34;
+  const lv_coord_t BTN_W = CAP_COMPACT_UI ? 32 : 38;
+  const lv_coord_t BTN_H = CAP_COMPACT_UI ? 24 : 28;
+  const lv_coord_t HOME_RES = CAP_COMPACT_UI ? 34 : 48;
 
   // Back button (far left): closes search if open, else goes up a folder.
   lv_obj_t* back = lv_btn_create(body);
-  lv_obj_set_size(back, 30, BTN_H);
-  lv_obj_set_pos(back, 3, 3);
+  lv_obj_set_size(back, CAP_COMPACT_UI ? 26 : 30, BTN_H);
+  lv_obj_set_pos(back, 3, CAP_COMPACT_UI ? 2 : 3);
   styleButton(back);
   lv_obj_set_style_bg_color(back, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN);
   lv_obj_set_style_pad_all(back, 0, LV_PART_MAIN);
@@ -23666,8 +23726,8 @@ static void buildFileManager(lv_obj_t* body) {
 
   // "+" button (next to Back): opens the folder menu (New folder / Paste).
   lv_obj_t* add = lv_btn_create(body);
-  lv_obj_set_size(add, 30, BTN_H);
-  lv_obj_set_pos(add, 36, 3);
+  lv_obj_set_size(add, CAP_COMPACT_UI ? 26 : 30, BTN_H);
+  lv_obj_set_pos(add, CAP_COMPACT_UI ? 32 : 36, CAP_COMPACT_UI ? 2 : 3);
   styleButton(add);
   lv_obj_set_style_bg_color(add, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN);
   lv_obj_set_style_pad_all(add, 0, LV_PART_MAIN);
@@ -23681,7 +23741,7 @@ static void buildFileManager(lv_obj_t* body) {
   const lv_coord_t find_x = bw - HOME_RES - BTN_W - 3;
   lv_obj_t* find = lv_btn_create(body);
   lv_obj_set_size(find, BTN_W, BTN_H);
-  lv_obj_set_pos(find, find_x, 3);
+  lv_obj_set_pos(find, find_x, CAP_COMPACT_UI ? 2 : 3);
   styleButton(find);
   lv_obj_set_style_bg_color(find, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN);
   lv_obj_set_style_pad_all(find, 0, LV_PART_MAIN);
@@ -23695,7 +23755,7 @@ static void buildFileManager(lv_obj_t* body) {
   const lv_coord_t sort_x = find_x - BTN_W - 3;
   lv_obj_t* sort = lv_btn_create(body);
   lv_obj_set_size(sort, BTN_W, BTN_H);
-  lv_obj_set_pos(sort, sort_x, 3);
+  lv_obj_set_pos(sort, sort_x, CAP_COMPACT_UI ? 2 : 3);
   styleButton(sort);
   lv_obj_set_style_bg_color(sort, lv_color_hex(COLOR_CONTROL), LV_PART_MAIN);
   lv_obj_set_style_pad_all(sort, 0, LV_PART_MAIN);
@@ -23706,11 +23766,11 @@ static void buildFileManager(lv_obj_t* body) {
   lv_obj_center(s_fm_sort_lbl);
 
   // Address bar (between the +/Back group and Sort), styled like a URL field.
-  const lv_coord_t loc_x = 36 + 30 + 4;   // past Back(3+30) and "+"(36+30)
+  const lv_coord_t loc_x = CAP_COMPACT_UI ? 62 : 70;
   const lv_coord_t loc_w = sort_x - 4 - loc_x;
   s_fm_path_lbl = lv_label_create(body);
   lv_label_set_long_mode(s_fm_path_lbl, LV_LABEL_LONG_DOT);
-  lv_obj_set_pos(s_fm_path_lbl, loc_x, 6);
+  lv_obj_set_pos(s_fm_path_lbl, loc_x, CAP_COMPACT_UI ? 4 : 6);
   lv_obj_set_width(s_fm_path_lbl, loc_w);
   // One line, fixed. LV_LABEL_LONG_DOT ellipsizes against the object's HEIGHT,
   // and a label defaults to LV_SIZE_CONTENT — so with no height set, a path too
@@ -24906,19 +24966,19 @@ static void openDiscoverPage() {
   s_apppage_close = closeDiscoverPage;
   statusBarSetTall(true);
   updateGlobalStatusBar();
-  const int top = STATUSBAR_H + 8;
+  const int top = CAP_COMPACT_UI ? 4 : STATUSBAR_H + 8;
 
   s_discover_status = lv_label_create(s_discover_root);
   lv_label_set_text(s_discover_status, TR("Scanning\xE2\x80\xA6"));
   lv_obj_set_style_text_font(s_discover_status, &g_font_12, LV_PART_MAIN);
   lv_obj_set_style_text_color(s_discover_status, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
-  lv_obj_set_pos(s_discover_status, 10, top);
-  lv_obj_set_width(s_discover_status, sw - 130);            // keep clear of the two header buttons
+  lv_obj_set_pos(s_discover_status, CAP_COMPACT_UI ? 6 : 10, top);
+  lv_obj_set_width(s_discover_status, CAP_COMPACT_UI ? sw - 68 : sw - 130);
   lv_label_set_long_mode(s_discover_status, LV_LABEL_LONG_DOT);
 
   lv_obj_t* btn = lv_btn_create(s_discover_root);           // Stop / Scan
-  lv_obj_set_size(btn, 56, 30);
-  lv_obj_set_pos(btn, sw - 62, top - 4);
+  lv_obj_set_size(btn, CAP_COMPACT_UI ? 48 : 56, CAP_COMPACT_UI ? 24 : 30);
+  lv_obj_set_pos(btn, sw - (CAP_COMPACT_UI ? 52 : 62), top - (CAP_COMPACT_UI ? 2 : 4));
   styleButton(btn);
   lv_obj_add_event_cb(btn, discoverScanToggleCb, LV_EVENT_CLICKED, nullptr);
   s_discover_btn_lbl = lv_label_create(btn);
@@ -24926,6 +24986,7 @@ static void openDiscoverPage() {
   lv_label_set_text(s_discover_btn_lbl, TR("Stop"));
   lv_obj_center(s_discover_btn_lbl);
 
+#if CAP_MAP
   lv_obj_t* mbtn = lv_btn_create(s_discover_root);          // Show on map
   lv_obj_set_size(mbtn, 56, 30);
   lv_obj_set_pos(mbtn, sw - 122, top - 4);
@@ -24935,11 +24996,17 @@ static void openDiscoverPage() {
   useChainedFont(mlbl);
   lv_label_set_text(mlbl, TR("Map"));
   lv_obj_center(mlbl);
+#endif
 
   lv_obj_t* sc = lv_obj_create(s_discover_root);
   lv_obj_remove_style_all(sc);
-  lv_obj_set_size(sc, sw, H - (top - STATUSBAR_H) - 34 - 20);   // leave a row for the wardrive footer
-  lv_obj_set_pos(sc, 0, top + 30);
+  if (CAP_COMPACT_UI) {
+    lv_obj_set_size(sc, sw, H - top - 27);
+    lv_obj_set_pos(sc, 0, top + 27);
+  } else {
+    lv_obj_set_size(sc, sw, H - (top - STATUSBAR_H) - 34 - 20);
+    lv_obj_set_pos(sc, 0, top + 30);
+  }
   lv_obj_set_style_bg_opa(sc, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_pad_all(sc, 8, LV_PART_MAIN);
   lv_obj_set_scroll_dir(sc, LV_DIR_VER);
@@ -24955,11 +25022,13 @@ static void openDiscoverPage() {
   lv_label_set_text(s_discover_feed, "");
 
   // wardriving footer (GPS + logged-count status), pinned at the bottom
+#if !CAP_COMPACT_UI
   s_disc_footer = lv_label_create(s_discover_root);
   lv_label_set_recolor(s_disc_footer, true);
   lv_obj_set_style_text_font(s_disc_footer, &g_font_12, LV_PART_MAIN);
   lv_obj_set_pos(s_disc_footer, 10, STATUSBAR_H + H - 18);
   lv_label_set_text(s_disc_footer, TR("#7A7F87 Wardrive: \xE2\x80\xA6#"));
+#endif
 
   the_mesh.discoverClear();
   s_discover_scanning = true;
@@ -26598,32 +26667,34 @@ static void openSpectrumPage() {
   s_apppage_close = closeSpectrumPage;
   statusBarSetTall(true);
   updateGlobalStatusBar();
-  const int top = STATUSBAR_H + 8;
+  const int top = CAP_COMPACT_UI ? 3 : STATUSBAR_H + 8;
 
   // ---- readout line: RBW / span (left)  +  live peak (right). The centre frequency
   //      lives on the frequency axis below, so it's dropped here to clear the peak. ----
   s_spec_info_lbl = lv_label_create(s_spec_root);
   char info[96];
-  snprintf(info, sizeof info, "RBW %.0fk     span %.0fM", (double)SPEC_RBW_KHZ, (double)(stop - start));
+  snprintf(info, sizeof info, CAP_COMPACT_UI ? "RBW %.0fk / %.0fM" : "RBW %.0fk     span %.0fM",
+           (double)SPEC_RBW_KHZ, (double)(stop - start));
   lv_label_set_text(s_spec_info_lbl, info);
   lv_obj_set_style_text_font(s_spec_info_lbl, &g_font_12, LV_PART_MAIN);
   lv_obj_set_style_text_color(s_spec_info_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
-  lv_obj_set_pos(s_spec_info_lbl, 10, top + 3);
+  lv_obj_set_pos(s_spec_info_lbl, CAP_COMPACT_UI ? 5 : 10, top + (CAP_COMPACT_UI ? 1 : 3));
 
   // live peak readout (right-aligned on the same row; updated each sweep)
   s_spec_peak_lbl = lv_label_create(s_spec_root);
   lv_label_set_text(s_spec_peak_lbl, TR("peak --"));
   lv_obj_set_style_text_font(s_spec_peak_lbl, &g_font_12, LV_PART_MAIN);
   lv_obj_set_style_text_color(s_spec_peak_lbl, lv_color_hex(0xF0D020), LV_PART_MAIN);
-  lv_obj_set_width(s_spec_peak_lbl, 150);
+  lv_obj_set_width(s_spec_peak_lbl, CAP_COMPACT_UI ? 82 : 150);
   lv_obj_set_style_text_align(s_spec_peak_lbl, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-  lv_obj_set_pos(s_spec_peak_lbl, sw - 8 - 150, top + 3);
+  lv_obj_set_pos(s_spec_peak_lbl, sw - 8 - (CAP_COMPACT_UI ? 82 : 150),
+                 top + (CAP_COMPACT_UI ? 1 : 3));
 
   // ---- live power-vs-frequency trace (lv_chart, LINE), like the Monitor ----
   const int chart_x = 40;
-  const int chart_y = top + 21;
+  const int chart_y = top + (CAP_COMPACT_UI ? 17 : 21);
   const int chart_w = sw - chart_x - 10;
-  const int chart_h = H * 22 / 100;                 // sized so the waterfall + axis clear the screen
+  const int chart_h = CAP_COMPACT_UI ? 22 : H * 22 / 100;
   s_spec_chart = lv_chart_create(s_spec_root);
   lv_obj_set_size(s_spec_chart, chart_w, chart_h);
   lv_obj_set_pos(s_spec_chart, chart_x, chart_y);
@@ -26658,7 +26729,7 @@ static void openSpectrumPage() {
   lv_chart_set_all_value(s_spec_chart, s_spec_ser, SPEC_DBM_MIN);
 
   // ---- waterfall canvas (RGB565, PSRAM-backed), stretched to the chart width ----
-  const int wf_y = chart_y + chart_h + 6;
+  const int wf_y = chart_y + chart_h + (CAP_COMPACT_UI ? 3 : 6);
   const int wf_w = chart_w;
   const int wf_disp_h = SPEC_WF_ROWS * wf_w / SPEC_BINS;   // on-screen height after the uniform zoom
   s_spec_wf_buf = (lv_color_t*)heap_caps_malloc(
@@ -26680,8 +26751,9 @@ static void openSpectrumPage() {
   // ---- vertical colour-scale legend in the empty left margin, beside the waterfall ----
   // red/strong at top -> blue/weak at bottom, with the live dBm endpoints flanking it.
   {
-    const int lg_x = 5, lg_w = 13;
-    const int lg_top = wf_y + 11, lg_bot = wf_y + wf_disp_h - 9;
+    const int lg_x = CAP_COMPACT_UI ? 3 : 5, lg_w = CAP_COMPACT_UI ? 10 : 13;
+    const int lg_top = wf_y + (CAP_COMPACT_UI ? 6 : 11);
+    const int lg_bot = wf_y + wf_disp_h - (CAP_COMPACT_UI ? 6 : 9);
     const int lg_h = lg_bot - lg_top;
     static const uint32_t kRampStops[5] =      // matches specHeat(): blue..cyan..green..yellow..red
         { 0x0000FF, 0x00FFFF, 0x00FF00, 0xFFFF00, 0xFF0000 };
@@ -26808,7 +26880,8 @@ static void makeHome(lv_obj_t* tab) {
   // No tile grid — bottom tab bar already gives quick access to Chats /
   // Contacts / Settings.
   styleSurface(tab, COLOR_BG);
-  lv_obj_set_style_pad_all(tab, 10, LV_PART_MAIN);
+  const int page_pad = uiPagePad();
+  lv_obj_set_style_pad_all(tab, page_pad, LV_PART_MAIN);
 
   const bool home_land = chatLandscape();
   s_home_nav_root = tab;
@@ -26829,7 +26902,7 @@ static void makeHome(lv_obj_t* tab) {
 
   // Content width = screen width minus the 10-px tab padding on each side.
   // Tracks rotation (220 portrait / 300 landscape).
-  const int cw = tabContentW() - 20;
+  const int cw = tabContentW() - page_pad * 2;
   // Landscape is short and wide: park the Send-advert button in the empty
   // right-hand strip (top-right) instead of a full-width bottom row, so the
   // TX/RX chart can use the freed vertical space and be ~2x taller.
@@ -26842,13 +26915,18 @@ static void makeHome(lv_obj_t* tab) {
   const int home_state_y  = pager_size ? 2 : 4;
   const int home_unread_y = pager_size ? home_state_y + home_line_h + 2 : 22;
   const int home_stats_y  = pager_size ? home_unread_y + home_line_h + 2 : 40;
+#elif CAP_COMPACT_UI
+  const int BTNW = 104;
+  const int home_state_y  = 0;
+  const int home_unread_y = 16;
+  const int home_stats_y  = 32;
 #else
   const int BTNW = SC(100);
   const int home_state_y  = SC(4);
   const int home_unread_y = SC(22);
   const int home_stats_y  = SC(40);
 #endif
-  const int RSTRIP = BTNW + 10;
+  const int RSTRIP = BTNW + (CAP_COMPACT_UI ? 4 : 10);
 
   // The previous in-tab status row (heartbeat dot, MESHCOMOD title, clock,
   // battery %, battery icon) is now replaced by the always-visible global
@@ -26875,6 +26953,10 @@ static void makeHome(lv_obj_t* tab) {
   lv_label_set_text(g_lv.home_state, TR("Connecting..."));
   lv_obj_set_style_text_color(g_lv.home_state, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   lv_obj_set_style_text_font(g_lv.home_state, &g_font_14, LV_PART_MAIN);   // match the other status lines (scales with UI size)
+  if (CAP_COMPACT_UI) {
+    lv_obj_set_width(g_lv.home_state, cw - RSTRIP);
+    lv_label_set_long_mode(g_lv.home_state, LV_LABEL_LONG_DOT);
+  }
   lv_obj_align(g_lv.home_state, LV_ALIGN_TOP_LEFT, 0, home_state_y);
 
   // Unread line — its own tappable row (mail icon + live count) that jumps to
@@ -26964,6 +27046,8 @@ static void makeHome(lv_obj_t* tab) {
   // re-flows the TX/RX legend + chart + advert button to the measured bottom.
 #if defined(TLORA_PAGER)
   const int chart_y = pager_size ? home_stats_y + home_line_h + 4 : 60;
+#elif CAP_COMPACT_UI
+  const int chart_y = 49;
 #elif defined(HAS_EXPANSION_KIT)
   // With the env widget present, push the TX/RX chart down to clear the env
   // label (SC(58)) + env chart (SC(92)). With it hidden, sit at the normal
@@ -26975,6 +27059,8 @@ static void makeHome(lv_obj_t* tab) {
 #endif
 #if defined(TLORA_PAGER)
   const int chart_head_h = pager_size ? lv_font_get_line_height(&g_font_12) + 2 : 16;
+#elif CAP_COMPACT_UI
+  const int chart_head_h = 13;
 #else
   const int chart_head_h = 16;
 #endif
@@ -26988,7 +27074,7 @@ static void makeHome(lv_obj_t* tab) {
   lv_obj_set_ext_click_area(s_home_chart_legend, 8);
   lv_obj_add_event_cb(s_home_chart_legend, homeChartClickedCb, LV_EVENT_CLICKED, nullptr);
 
-#if defined(HAS_TDECK_GT911) || defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_RAK_TAP_V2) || defined(HAS_THINKNODE_M9) || defined(HAS_WIO_TRACKER_L2) || defined(ATTAKY_MESH_SERIES)
+#if defined(HAS_TDECK_GT911) || defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_RAK_TAP_V2) || defined(HAS_THINKNODE_M9) || defined(HAS_WIO_TRACKER_L2) || defined(ATTAKY_MESH_SERIES) || CAP_COMPACT_UI
   // Landscape boards keep the chart clear of the right-hand button strip.
   const int chart_w = home_land ? (cw - RSTRIP) : cw;
 #else
@@ -26998,12 +27084,12 @@ static void makeHome(lv_obj_t* tab) {
   // tab padding, the chart's top offset, and the Send-advert button + gaps.
   // Portrait keeps the full 96 px; landscape (short screen) shrinks it so the
   // button doesn't run off the bottom.
-  const int home_avail = tabContentH() - 20;                 // inside 10-px pad
+  const int home_avail = tabContentH() - page_pad * 2;
   // Landscape: button sits in the right column, so the chart runs to the
   // bottom (no reserved button row). Portrait: reserve the button row below.
   int chart_h = home_avail - chart_body_y - 4 - (home_land ? 0 : (8 + 36));
   if (chart_h > 96) chart_h = 96;
-  if (chart_h < 28) chart_h = 28;
+  if (chart_h < (CAP_COMPACT_UI ? 22 : 28)) chart_h = CAP_COMPACT_UI ? 22 : 28;
 #if CAP_LARGE_SCREEN
   // Big screen: spread the four right-column buttons evenly down the FULL height.
   chart_h = 96;
@@ -27040,12 +27126,16 @@ static void makeHome(lv_obj_t* tab) {
   // evenly down the FULL content height so a 4th launcher ("Control panel") fits the
   // short 168-px T-Deck strip without overflowing. Slot count tracks the build:
   // GT911 (T-Deck) = Advert+Terminal+Files+Apps+Control = 5; otherwise 4.
-#if defined(HAS_TDECK_GT911) || defined(HAS_THINKNODE_M9)
+#if CAP_COMPACT_UI
+  const int td_btn_n = 4;
+  const int td_btn_gap = 3;
+#elif defined(HAS_TDECK_GT911) || defined(HAS_THINKNODE_M9)
   const int td_btn_n = 5;
+  const int td_btn_gap = 6;
 #else
   const int td_btn_n = 4;
-#endif
   const int td_btn_gap = 6;
+#endif
   int td_btn_h = (home_avail - (td_btn_n - 1) * td_btn_gap) / td_btn_n;
   if (td_btn_h > 46) td_btn_h = 46;                 // don't grow past the old Advert height
   if (td_btn_h < 22) td_btn_h = 22;
@@ -27092,6 +27182,7 @@ static void makeHome(lv_obj_t* tab) {
     lv_obj_set_style_radius(s_home_chart_sig, 3, LV_PART_MAIN);
     lv_obj_align(s_home_chart_sig, LV_ALIGN_TOP_LEFT, 2, 2);
 
+  #if !CAP_COMPACT_UI
     lv_obj_t* hint = lv_label_create(s_home_chart);
     lv_label_set_text(hint, TR("tap for details"));
     lv_obj_set_style_text_font(hint, &g_font_12, LV_PART_MAIN);
@@ -27104,6 +27195,7 @@ static void makeHome(lv_obj_t* tab) {
     // translation it sits close to the Sig chip, but keeping the cue at the top of the
     // box is preferred.
     lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -2, 2);
+  #endif
   }
 
 #if CAP_LARGE_SCREEN
@@ -27385,7 +27477,7 @@ static void makeChatList(lv_obj_t* tab, LvChatPanel& p, bool channel_mode, bool 
   // Inset the top so the FIRST row rests just below the tall bar (the inbox opens at the
   // top, unlike the chat which opens at the bottom). Older rows still scroll UP under the
   // glass lower row — and now read through it because the rows are a visible grey.
-#if !defined(TLORA_PAGER)
+#if !defined(TLORA_PAGER) && !CAP_COMPACT_UI
   if (inbox_combined) lv_obj_set_style_pad_top(p.list_cont, STATUSBAR_H, LV_PART_MAIN);
 #endif
   lv_obj_set_style_pad_row(p.list_cont, 1, LV_PART_MAIN);
@@ -28025,7 +28117,8 @@ static void makeContactsTab(lv_obj_t* tab) {
   // Contacts tab feel chunkier than the Chats tab. Full screen width so the
   // SPACE_BETWEEN flex pins the overflow button to the right edge in either
   // orientation.
-  lv_obj_set_size(row, tabContentW(), 32);
+  const lv_coord_t contacts_header_h = CAP_COMPACT_UI ? 28 : 32;
+  lv_obj_set_size(row, tabContentW(), contacts_header_h);
   lv_obj_set_pos(row, 0, 0);
   lv_obj_set_style_pad_hor(row, 4, LV_PART_MAIN);
   lv_obj_set_style_pad_ver(row, 2, LV_PART_MAIN);
@@ -28036,7 +28129,7 @@ static void makeContactsTab(lv_obj_t* tab) {
   // Row layout: a wide segmented filter on the left, a "⋯" overflow button
   // on the right. SPACE_BETWEEN pins them to the two edges.
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  constexpr lv_coord_t kChipH = 28;
+  const lv_coord_t kChipH = CAP_COMPACT_UI ? 24 : 28;
 
   // ---- Big "Discovered" button (→ discovered list) with a count badge ----
   {
@@ -28146,8 +28239,8 @@ static void makeContactsTab(lv_obj_t* tab) {
   // vertical real estate. (Also keeps the contacts list height in sync
   // with the Chats list, which sits below a 32-px header.) Sized from the
   // live content area so it fills the screen in either orientation.
-  lv_obj_set_size(g_lv.contacts_list, tabContentW(), tabContentH() - 34);
-  lv_obj_set_pos(g_lv.contacts_list, 0, 34);
+  lv_obj_set_size(g_lv.contacts_list, tabContentW(), tabContentH() - contacts_header_h - 2);
+  lv_obj_set_pos(g_lv.contacts_list, 0, contacts_header_h + 2);
   styleSurface(g_lv.contacts_list, COLOR_BG, 0);
   lv_obj_set_style_border_width(g_lv.contacts_list, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(g_lv.contacts_list, 0, LV_PART_MAIN);
@@ -28157,7 +28250,7 @@ static void makeContactsTab(lv_obj_t* tab) {
   // ---- Select-mode toolbar (hidden until "Select to delete"): Cancel / Select all / Delete (N) ----
   s_ct_select_bar = lv_obj_create(tab);
   lv_obj_remove_style_all(s_ct_select_bar);
-  lv_obj_set_size(s_ct_select_bar, tabContentW(), 32);
+  lv_obj_set_size(s_ct_select_bar, tabContentW(), contacts_header_h);
   lv_obj_set_pos(s_ct_select_bar, 0, 0);
   lv_obj_set_style_bg_color(s_ct_select_bar, lv_color_hex(COLOR_BG), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_ct_select_bar, LV_OPA_COVER, LV_PART_MAIN);
@@ -34761,7 +34854,7 @@ static void openSettingsCategory(int cat) {
   lv_obj_set_pos(page, 0, 0);
   lv_obj_set_size(page, sw, sh - STATUSBAR_H);
   prepSettingsPage(page);
-  lv_obj_set_style_pad_top(page, STATUSBAR_H + 8, LV_PART_MAIN);   // clear the glass lower bar row
+  lv_obj_set_style_pad_top(page, CAP_COMPACT_UI ? 4 : STATUSBAR_H + 8, LV_PART_MAIN);
 
   resetSettingsModalState();
   s_settings_inline_parent = page;
@@ -34845,17 +34938,21 @@ static void makeSettings(lv_obj_t* tab) {
   lv_obj_remove_style_all(land);
   lv_obj_set_size(land, lv_pct(100), lv_pct(100));
   styleSurface(land, COLOR_BG, 0);
-  lv_obj_set_style_pad_all(land, 8, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(land, 8, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(land, 8, LV_PART_MAIN);
+  const lv_coord_t land_pad = CAP_COMPACT_UI ? 4 : 8;
+  const lv_coord_t land_gap = CAP_COMPACT_UI ? 4 : 8;
+  lv_obj_set_style_pad_all(land, land_pad, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(land, land_gap, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(land, land_gap, LV_PART_MAIN);
   lv_obj_set_scroll_dir(land, LV_DIR_VER);
   styleSettingsScrollbar(land);
   lv_obj_set_flex_flow(land, landscape ? LV_FLEX_FLOW_ROW_WRAP : LV_FLEX_FLOW_COLUMN);
 
   // hor - 16 (page pad) - 8 (right gutter so the rightmost card clears the scrollbar);
   // landscape subtracts another 8 for the inter-column gap, then halves.
-  const lv_coord_t card_w = landscape ? (lv_coord_t)((hor - 24 - 8) / 2) : (lv_coord_t)(hor - 24);
-  const lv_coord_t card_h = landscape ? 54 : 46;
+  const lv_coord_t card_w = CAP_COMPACT_UI
+      ? (lv_coord_t)((hor - land_pad * 2 - land_gap - 4) / 2)
+      : landscape ? (lv_coord_t)((hor - 24 - 8) / 2) : (lv_coord_t)(hor - 24);
+  const lv_coord_t card_h = CAP_COMPACT_UI ? 34 : landscape ? 54 : 46;
 
   for (int c = 0; c < CAT_COUNT; ++c) {
 #if !CAP_LOCK_SCREEN
@@ -34874,7 +34971,7 @@ static void makeSettings(lv_obj_t* tab) {
     lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_RAISED), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_radius(card, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, CAP_COMPACT_UI ? 6 : 10, LV_PART_MAIN);
     lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(card, lv_color_hex(themeRole(0x2A2E34, COLOR_BORDER)), LV_PART_MAIN);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
@@ -34882,13 +34979,13 @@ static void makeSettings(lv_obj_t* tab) {
 
     lv_obj_t* icon = lv_label_create(card);
     lv_label_set_text(icon, kSettingsCats[c].icon);
-    lv_obj_set_style_text_font(icon, &g_font_16, LV_PART_MAIN);
+    lv_obj_set_style_text_font(icon, CAP_COMPACT_UI ? &g_font_14 : &g_font_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(icon, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN);
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 12, 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, CAP_COMPACT_UI ? 6 : 12, 0);
 
     lv_obj_t* lbl = lv_label_create(card);
     lv_label_set_text(lbl, TR(kSettingsCats[c].label));
-    lv_obj_set_style_text_font(lbl, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(lbl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     // Category name sits visually CENTRED in the card (icon stays a left accent).
     // The label spans the card minus a symmetric margin (so the left accent icon
@@ -34901,10 +34998,11 @@ static void makeSettings(lv_obj_t* tab) {
     // "Radio & Mesh" wrapped to two lines. Using the full post-icon width (~100 px)
     // keeps every English category name on one line, unsplit; long translations
     // still wrap at word boundaries.
-    lv_obj_set_width(lbl, card_w - 34 - 8);   // start just past the icon, small right margin
+    const lv_coord_t label_x = CAP_COMPACT_UI ? 22 : 34;
+    lv_obj_set_width(lbl, card_w - label_x - (CAP_COMPACT_UI ? 3 : 8));
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 34, 0);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, label_x, 0);
 
     if (c == CAT_ABOUT) {   // update-available dot rides on the About card
       s_update_subtab_badge = lv_obj_create(card);
@@ -35075,10 +35173,10 @@ static void openTraceResultPopup(const char* title, const char* body) {
 
 #if CAP_LARGE_SCREEN
   const int card_w = PCW(220);
-  const int card_h = PSC(236);
+  const int card_h = modalCardH(PSC(236));
 #else
-  const int card_w = 220;
-  const int card_h = 236;
+  const int card_w = CAP_COMPACT_UI ? modalAvailW() : 220;
+  const int card_h = modalCardH(236);
 #endif
   lv_obj_t* card = lv_obj_create(s_trace_result_root);
   lv_obj_remove_style_all(card);
@@ -35089,7 +35187,7 @@ static void openTraceResultPopup(const char* title, const char* body) {
   lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 10, LV_PART_MAIN);
   lv_obj_set_scroll_dir(card, LV_DIR_VER);
   addCloseXBadge(card, traceResultBackdropCb);
 
@@ -36959,10 +37057,14 @@ static void openUrlQrPopup(const char* url) {
   lv_obj_set_style_bg_opa(s_urlqr_root, LV_OPA_60, LV_PART_MAIN);
   lv_obj_clear_flag(s_urlqr_root, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(s_urlqr_root, urlQrBackdropCb, LV_EVENT_CLICKED, nullptr);
-  int card_w = PCW(230); if (card_w > modalAvailW()) card_w = modalAvailW();
-  int card_h = PSC(250); if (card_h > modalAvailH()) card_h = modalAvailH();
-  int qr_size = card_h - 34 - 34 - 20; if (qr_size > PSC(160)) qr_size = PSC(160);
-  if (qr_size > card_w - 20) qr_size = card_w - 20; if (qr_size < 96) qr_size = 96;
+  int card_w = CAP_COMPACT_UI ? modalAvailW() : PCW(230);
+  if (card_w > modalAvailW()) card_w = modalAvailW();
+  int card_h = CAP_COMPACT_UI ? modalAvailH() : PSC(250);
+  if (card_h > modalAvailH()) card_h = modalAvailH();
+  int qr_size = CAP_COMPACT_UI ? card_h - 30 : card_h - 34 - 34 - 20;
+  if (qr_size > PSC(160)) qr_size = PSC(160);
+  if (qr_size > card_w - (CAP_COMPACT_UI ? 8 : 20)) qr_size = card_w - (CAP_COMPACT_UI ? 8 : 20);
+  if (qr_size < (CAP_COMPACT_UI ? 64 : 96)) qr_size = CAP_COMPACT_UI ? 64 : 96;
   lv_obj_t* card = lv_obj_create(s_urlqr_root);
   lv_obj_remove_style_all(card);
   lv_obj_set_size(card, card_w, card_h);
@@ -36972,24 +37074,25 @@ static void openUrlQrPopup(const char* url) {
   lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 10, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   addCloseXBadge(card, urlQrBackdropCb);
   lv_obj_t* title = lv_label_create(card);
   lv_label_set_text(title, TR("Scan to open on phone"));
   lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-  lv_obj_set_width(title, card_w - 20 - 32);
+  lv_obj_set_width(title, card_w - (CAP_COMPACT_UI ? 8 : 20) - 32);
   lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &g_font_14, LV_PART_MAIN);
-  lv_obj_set_pos(title, 0, 4);
+  lv_obj_set_style_text_font(title, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
+  lv_obj_set_pos(title, 0, CAP_COMPACT_UI ? 0 : 4);
   char full[260];   // a bare www. host gets https:// so the phone opens it
   if (!urlCiHas(url, "http", 4)) snprintf(full, sizeof full, "https://%s", url);
   else                          snprintf(full, sizeof full, "%s", url);
   lv_obj_t* qr = lv_qrcode_create(card, qr_size, lv_color_hex(0x000000), lv_color_hex(0xFFFFFF));
   lv_qrcode_update(qr, full, strlen(full));
-  lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, 32);
+  lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, CAP_COMPACT_UI ? 18 : 32);
   lv_obj_set_style_border_color(qr, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_border_width(qr, 4, LV_PART_MAIN);
+  lv_obj_set_style_border_width(qr, CAP_COMPACT_UI ? 2 : 4, LV_PART_MAIN);
+#if !CAP_COMPACT_UI
   lv_obj_t* u = lv_label_create(card);
   lv_label_set_long_mode(u, LV_LABEL_LONG_DOT);
   lv_obj_set_width(u, card_w - 20);
@@ -36997,6 +37100,7 @@ static void openUrlQrPopup(const char* url) {
   lv_obj_set_style_text_font(u, &g_font_12, LV_PART_MAIN);
   lv_obj_set_style_text_color(u, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   lv_obj_align(u, LV_ALIGN_BOTTOM_MID, 0, -2);
+#endif
 }
 
 // ---- URL action menu (short tap on a chat URL) ----
@@ -37046,8 +37150,12 @@ static void openUrlMenu(const char* url) {
   lv_obj_set_style_bg_opa(s_urlmenu_root, LV_OPA_60, LV_PART_MAIN);
   lv_obj_clear_flag(s_urlmenu_root, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(s_urlmenu_root, urlMenuBackdropCb, LV_EVENT_CLICKED, nullptr);
-  const int card_w = PCW(230), btn_h = PSC(34), pad = PSC(12), gap = PSC(8), url_h = PSC(18);
-#if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
+  const int card_w = CAP_COMPACT_UI ? modalAvailW() : PCW(230);
+  const int btn_h = CAP_COMPACT_UI ? uiButtonH() : PSC(34);
+  const int pad = CAP_COMPACT_UI ? 4 : PSC(12);
+  const int gap = CAP_COMPACT_UI ? 4 : PSC(8);
+  const int url_h = CAP_COMPACT_UI ? 14 : PSC(18);
+#if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION) && CAP_WEB_BROWSER
   const int nbtn = 2;
 #else
   const int nbtn = 1;
@@ -37059,7 +37167,7 @@ static void openUrlMenu(const char* url) {
   lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
   lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
+  lv_obj_set_style_radius(card, CAP_COMPACT_UI ? 6 : 8, LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
   lv_obj_set_style_pad_all(card, pad, LV_PART_MAIN);
@@ -37079,7 +37187,7 @@ static void openUrlMenu(const char* url) {
     styleButton(b);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* l = lv_label_create(b); lv_label_set_text(l, TR(txt));
-    lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     lv_obj_center(l);
     by += btn_h + gap;
@@ -37825,7 +37933,7 @@ static void refreshChatList(LvChatPanel& p) {
   // every periodic refresh, which resets the scroll to the top — so skip the rebuild
   // entirely when nothing changed (the common case while you're just scrolling), and
   // otherwise preserve the scroll position across it.
-  const bool compact_rows = touchPrefsGetCompactChat();   // compact = today's dense contact-style rows; off = WhatsApp-style
+  const bool compact_rows = CAP_COMPACT_UI || touchPrefsGetCompactChat();
   uint32_t sig = 2166136261u;
   auto mix = [&sig](uint32_t v) { sig = (sig ^ v) * 16777619u; };
   mix((uint32_t)count);
@@ -37891,8 +37999,9 @@ static void refreshChatList(LvChatPanel& p) {
     // Contacts rows are a FIXED 34 px; mirror that instead of min-height + fat
     // vertical padding, and centre the icon/name on the row's cross axis.
     lv_obj_set_style_pad_ver(btn, 0, LV_PART_MAIN);
-    lv_obj_set_style_min_height(btn, 34, LV_PART_MAIN);
-    lv_obj_set_height(btn, 34);
+    const lv_coord_t compact_row_h = CAP_COMPACT_UI ? 30 : 34;
+    lv_obj_set_style_min_height(btn, compact_row_h, LV_PART_MAIN);
+    lv_obj_set_height(btn, compact_row_h);
     lv_obj_set_style_pad_left(btn, 8, LV_PART_MAIN);   // contacts icon_x
     lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     // Type icon in the contacts style: 16 px glyph, muted — the name carries the
@@ -37910,7 +38019,7 @@ static void refreshChatList(LvChatPanel& p) {
       lv_obj_remove_style_all(gear);
       lv_obj_add_flag(gear, LV_OBJ_FLAG_IGNORE_LAYOUT);
       lv_obj_add_flag(gear, NAV_HMOVE_FLAG);   // keyboard nav: reach the gear with RIGHT (not UP/DOWN); keeps the row itself focusable so the chat opens
-      lv_obj_set_size(gear, gear_w, 30);
+      lv_obj_set_size(gear, gear_w, CAP_COMPACT_UI ? 26 : 30);
       lv_obj_align(gear, LV_ALIGN_RIGHT_MID, -2, 0);
       lv_obj_add_event_cb(gear, threadGearCb, LV_EVENT_CLICKED, &p.ctx_store[i]);
       lv_obj_t* gl = lv_label_create(gear);
@@ -38581,7 +38690,7 @@ static void refreshContactsList() {
   // compact row geometry even when the UI-size preset selects larger fonts;
   // stacking the name and metadata line heights here reserved a second line
   // that the wide layout never draws.
-  const int  ROW_H   = mid_cols ? 46 : 34;
+  const int  ROW_H   = CAP_COMPACT_UI ? 30 : mid_cols ? 46 : 34;
   const int  row2_y  = 5 + name_line_h_row + 2;          // line 2 top (below the name line)
   int        name_w  = heard_x - name_x - 6;
   if (name_w < 50) name_w = 50;
@@ -42969,6 +43078,9 @@ static void openPowerMenu() {
   // ROM force-download leaves a COM that esptool cannot open on HW CDC — hide the entry.
   const int card_w = (sw - 40 > 240) ? 240 : (sw - 40);
   const int p_bh = 34, p_y0 = 28, p_step = 40, card_h = p_y0 + 3 * p_step + 8;
+#elif CAP_COMPACT_UI
+  const int card_w = sw - 8;
+  const int p_bh = 24, p_y0 = 20, p_step = 27, card_h = sh - STATUSBAR_H - 6;
 #elif defined(HAS_THINKNODE_M9) || defined(HAS_WIO_TRACKER_L2)
   // Power-off row hidden (see below) — 3 rows: Reboot / Download / Cancel.
   const int card_w = (sw - 40 > 240) ? 240 : (sw - 40);
@@ -42981,21 +43093,21 @@ static void openPowerMenu() {
   lv_obj_remove_style_all(card);
   lv_obj_set_size(card, card_w, card_h);
   lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
-  styleSurface(card, COLOR_PANEL, 10);
+  styleSurface(card, COLOR_PANEL, CAP_COMPACT_UI ? 6 : 10);
   lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 12, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 12, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t* title = lv_label_create(card);
   lv_label_set_text(title, TR(LV_SYMBOL_POWER "  Power"));
-  lv_obj_set_style_text_font(title, &g_font_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, CAP_COMPACT_UI ? &g_font_14 : &g_font_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
 
   auto mk = [&](const char* txt, lv_event_cb_t cb, uint32_t bg, int y) {
     lv_obj_t* b = lv_btn_create(card);
-    lv_obj_set_size(b, card_w - 24, p_bh);
+    lv_obj_set_size(b, card_w - (CAP_COMPACT_UI ? 8 : 24), p_bh);
     lv_obj_align(b, LV_ALIGN_TOP_MID, 0, y);
     styleButton(b);
     if (bg) {
@@ -43006,7 +43118,7 @@ static void openPowerMenu() {
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* l = lv_label_create(b);
     lv_label_set_text(l, TR(txt));
-    lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(l,
       lv_color_hex(bg ? COLOR_ON_STATUS_DANGER
               : COLOR_TEXT), LV_PART_MAIN);
@@ -43344,12 +43456,7 @@ static void openControlCenter() {
   // the screen behind the translucent card — that keeps the panel's own content crisp/readable
   // while the card fill stays see-through enough to still read as glass.
   lv_obj_set_style_bg_opa(s_cc_root, LV_OPA_70, LV_PART_MAIN);
-#if defined(HAS_CARDPUTER_ADV)
-  lv_obj_set_scroll_dir(s_cc_root, LV_DIR_VER);
-  lv_obj_set_scrollbar_mode(s_cc_root, LV_SCROLLBAR_MODE_AUTO);
-#else
   lv_obj_clear_flag(s_cc_root, LV_OBJ_FLAG_SCROLLABLE);
-#endif
   lv_obj_move_foreground(s_cc_root);
   lv_obj_add_event_cb(s_cc_root, ccBackdropCb, LV_EVENT_CLICKED, nullptr);
 
@@ -43383,9 +43490,7 @@ static void openControlCenter() {
   // available height instead of the shared constant, with a small margin.
   const int card_h = sh - STATUSBAR_H - 4 - 6;
 #elif defined(HAS_CARDPUTER_ADV)
-  // The physical viewport below the status bar is only about 113 px. Keep the
-  // established control geometry and let keyboard focus scroll the root.
-  const int card_h = 212;
+  const int card_h = sh - STATUSBAR_H - 6;
 #elif defined(HAS_TDISPLAY_P4)
   // Tall panel (1232 px): the shared V4 236px card is far too short here. The P4's
   // GPS line sits lower (it clears two 30px sliders, so gps_y ~124 vs the V4's ~70),
@@ -43405,11 +43510,11 @@ static void openControlCenter() {
   // Only the panel BACKGROUND is see-through — the clock/sliders/chips drawn on top stay
   // fully opaque, so nothing becomes hard to read. ~85% keeps it clearly a solid surface.
   lv_obj_set_style_bg_opa(card, 218, LV_PART_MAIN);
-  lv_obj_set_style_radius(card, 12, LV_PART_MAIN);
+  lv_obj_set_style_radius(card, CAP_COMPACT_UI ? 6 : 12, LV_PART_MAIN);
   // Subtle light hairline (instead of the near-black border) reads more like a glass edge.
   lv_obj_set_style_border_color(card, lv_color_hex(themeRole(0x3A3D42, COLOR_BORDER)), LV_PART_MAIN);
   lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(card, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CAP_COMPACT_UI ? 4 : 10, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(card, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
@@ -43505,7 +43610,7 @@ static void openControlCenter() {
   const int gps_y = row_y;
 #endif
 
-#if !defined(HAS_THINKNODE_M9) && !defined(TLORA_PAGER)
+#if !defined(HAS_THINKNODE_M9) && !defined(TLORA_PAGER) && !CAP_COMPACT_UI
   // ---- GPS fix status (live; refreshed while the panel is open) ----
   s_cc_gps_label = lv_label_create(card);
   lv_label_set_long_mode(s_cc_gps_label, LV_LABEL_LONG_DOT);
@@ -43607,7 +43712,7 @@ static void openControlCenter() {
   lv_obj_add_event_cb(bl, ccBrightnessReleaseCb, LV_EVENT_RELEASED,      nullptr);
 #endif
 
-#if !defined(HAS_THINKNODE_M9) && !defined(TLORA_PAGER)
+#if !defined(HAS_THINKNODE_M9) && !defined(TLORA_PAGER) && !CAP_COMPACT_UI
   // ---- System info line (CPU + RAM% + PSRAM% + IP) — one thin line, pinned to
   //      the very bottom of the card. Memory is shown as % used so it stays
   //      compact and all four facts fit on one row.
@@ -43651,6 +43756,12 @@ static void openControlCenter() {
   lv_obj_align(row, LV_ALIGN_TOP_MID, 0, controls_y);
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
   lv_obj_set_style_pad_row(row, 4, LV_PART_MAIN);
+#elif CAP_COMPACT_UI
+  const int controls_y = bl_y + 14;
+  lv_obj_set_size(row, card_w - 8, 32);
+  lv_obj_align(row, LV_ALIGN_TOP_MID, 0, controls_y);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(row, 2, LV_PART_MAIN);
 #elif defined(HAS_TDECK_GT911)
   // 2-row grid: 4 chips per row, so chip 5 (Lock) wraps onto a 2nd row. Sits
   // ABOVE the bottom system-info line (-16 offset leaves room for it).
@@ -43666,11 +43777,11 @@ static void openControlCenter() {
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
   lv_obj_set_style_pad_column(row, 5, LV_PART_MAIN);
 #endif
-#if !defined(HAS_THINKNODE_M9) && !defined(TLORA_PAGER)
+#if !defined(HAS_THINKNODE_M9) && !defined(TLORA_PAGER) && !CAP_COMPACT_UI
   // Bottom-anchored but lifted clear of the 1-line sysinfo (~16 px) plus a gap.
   lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, -20);
 #endif
-#if defined(HAS_THINKNODE_M9) || defined(TLORA_PAGER)
+#if defined(HAS_THINKNODE_M9) || defined(TLORA_PAGER) || CAP_COMPACT_UI
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_SPACE_EVENLY);
 #else
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -43687,6 +43798,8 @@ static void openControlCenter() {
   th = 80;
 #elif defined(HAS_THINKNODE_M9) || defined(TLORA_PAGER)
   tw = 56; th = 34;
+#elif CAP_COMPACT_UI
+  tw = 34; th = 30;
 #elif defined(HAS_TDECK_GT911)
   tw = 58; th = 36;
 #else
@@ -45311,7 +45424,7 @@ static void addAppTile(lv_obj_t* parent, int x, int y, int w, int h,
   lv_obj_set_size(t, w, h);
   lv_obj_set_pos(t, x, y);
   lv_obj_set_style_bg_opa(t, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_radius(t, 12, LV_PART_MAIN);
+  lv_obj_set_style_radius(t, CAP_COMPACT_UI ? 6 : 12, LV_PART_MAIN);
   lv_obj_set_style_bg_color(t, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_bg_opa(t, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_add_event_cb(t, appTileCb, LV_EVENT_CLICKED, (void*)(intptr_t)act);
@@ -45323,7 +45436,9 @@ static void addAppTile(lv_obj_t* parent, int x, int y, int w, int h,
   // Rounded-square chip (iOS-style squircle), tinted with the app's accent
   // colour, centred up top. Bigger + a small proportional corner radius so it
   // reads as a SQUARE app icon, not a circle.
-#if CAP_UI_SIZE
+#if CAP_COMPACT_UI
+  int chip = h - 16;
+#elif CAP_UI_SIZE
   // Reserve the ACTUAL label line height (it grows with the UI-scale font) so the
   // name never overlaps the icon chip on the big panel.
   int chip = h - (lv_font_get_line_height(big ? &g_font_14 : &g_font_12) + 10);
@@ -45331,13 +45446,13 @@ static void addAppTile(lv_obj_t* parent, int x, int y, int w, int h,
   int chip = h - (big ? 26 : 22);    // leave one label line beneath (taller in large mode)
 #endif
   if (chip > w - 6)         chip = w - 6;
-  if (chip > (big ? 80 : 58)) chip = (big ? 80 : 58);   // higher cap so large-mode chips actually grow
-  if (chip < 30)           chip = 30;
+  if (chip > (CAP_COMPACT_UI ? 28 : (big ? 80 : 58))) chip = CAP_COMPACT_UI ? 28 : (big ? 80 : 58);
+  if (chip < (CAP_COMPACT_UI ? 22 : 30)) chip = CAP_COMPACT_UI ? 22 : 30;
   lv_obj_t* chip_o = lv_obj_create(t);
   lv_obj_remove_style_all(chip_o);
   lv_obj_clear_flag(chip_o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_size(chip_o, chip, chip);
-  lv_obj_align(chip_o, LV_ALIGN_TOP_MID, 0, 5);
+  lv_obj_align(chip_o, LV_ALIGN_TOP_MID, 0, CAP_COMPACT_UI ? 1 : 5);
   lv_obj_set_style_bg_color(chip_o, lv_color_hex(icon_col), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(chip_o, LV_OPA_20, LV_PART_MAIN);
   lv_obj_set_style_radius(chip_o, chip * 22 / 100, LV_PART_MAIN);   // ~22% squircle, not a circle
@@ -45421,7 +45536,8 @@ static void addAppTile(lv_obj_t* parent, int x, int y, int w, int h,
     // to avoid a tofu box; every other tile is a standard LVGL/ASCII symbol.
     const bool custom_glyph = (strcmp(icon, TOUCH_SYM_PERSON) == 0 ||
                                strcmp(icon, TOUCH_SYM_ANTENNA) == 0);
-    lv_obj_set_style_text_font(ic, (big && !custom_glyph) ? &lv_font_montserrat_28 : &g_font_16,
+    lv_obj_set_style_text_font(ic, CAP_COMPACT_UI ? &g_font_14
+                   : (big && !custom_glyph) ? &lv_font_montserrat_28 : &g_font_16,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(ic, lv_color_hex(icon_col), LV_PART_MAIN);
     lv_obj_center(ic);
@@ -45458,7 +45574,7 @@ static void addAppTile(lv_obj_t* parent, int x, int y, int w, int h,
   lv_obj_set_width(lb, w);
   lv_label_set_long_mode(lb, LV_LABEL_LONG_DOT);
   lv_obj_set_height(lb, lv_font_get_line_height(lv_obj_get_style_text_font(lb, LV_PART_MAIN)));
-  lv_obj_align(lb, LV_ALIGN_BOTTOM_MID, 0, -2);
+  lv_obj_align(lb, LV_ALIGN_BOTTOM_MID, 0, CAP_COMPACT_UI ? 0 : -2);
 
   // Notification badge: a small red count pill in the top-right corner.
   if (badge > 0) {
@@ -45469,8 +45585,8 @@ static void addAppTile(lv_obj_t* parent, int x, int y, int w, int h,
     lv_obj_set_style_bg_opa(bdg, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(bdg, 9, LV_PART_MAIN);
     lv_obj_set_style_pad_hor(bdg, 4, LV_PART_MAIN);
-    lv_obj_set_size(bdg, LV_SIZE_CONTENT, 18);
-    lv_obj_align(bdg, LV_ALIGN_TOP_MID, chip / 2 - 6, 2);   // overhang the chip's top-right corner
+    lv_obj_set_size(bdg, LV_SIZE_CONTENT, CAP_COMPACT_UI ? 14 : 18);
+    lv_obj_align(bdg, LV_ALIGN_TOP_MID, chip / 2 - 6, CAP_COMPACT_UI ? 0 : 2);
     lv_obj_t* bt = lv_label_create(bdg);
     char bn[8]; snprintf(bn, sizeof bn, "%d", badge > 99 ? 99 : badge);
     lv_label_set_text(bt, bn);
@@ -45641,7 +45757,7 @@ static void openAppDrawer() {
   lv_obj_set_style_bg_color(s_appdrawer_root, lv_color_hex(COLOR_BG), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_appdrawer_root, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_appdrawer_root, LV_DIR_VER);   // grid scrolls top->bottom when it overflows
-  lv_obj_set_style_pad_bottom(s_appdrawer_root, 10, LV_PART_MAIN);   // room past the last row when scrolled
+  lv_obj_set_style_pad_bottom(s_appdrawer_root, CAP_COMPACT_UI ? 4 : 10, LV_PART_MAIN);
   // A clearly visible scrollbar so users discover the lower rows. The mode is
   // set after the grid is measured (ON when it overflows, OFF when it all fits).
   lv_obj_set_style_bg_color(s_appdrawer_root, lv_color_hex(COLOR_ACCENT), LV_PART_SCROLLBAR);
@@ -45730,20 +45846,24 @@ static void openAppDrawer() {
   // scroll region rather than shrinking the tiles to tiny squares.
   // Grid size: compact (board default) or LARGE (one fewer column → bigger tiles,
   // icons + labels, for low vision). Toggled from the app-drawer cog (top-right).
-  const bool big_grid = touchPrefsGetAppGridLarge();
-#if defined(HAS_TDECK_GT911)
+  const bool big_grid = CAP_COMPACT_UI ? false : touchPrefsGetAppGridLarge();
+#if CAP_COMPACT_UI
+  const int cols = 4;
+#elif defined(HAS_TDECK_GT911)
   const int cols = big_grid ? 3 : 4;
 #else
   const int cols = big_grid ? 2 : 3;
 #endif
-  const int pad = 10, gap = 8, top = 10;
+  const int pad = CAP_COMPACT_UI ? 4 : 10;
+  const int gap = CAP_COMPACT_UI ? 4 : 8;
+  const int top = CAP_COMPACT_UI ? 4 : 10;
   const int grid_w = sw - 2 * pad;
   const int tile_w = (grid_w - (cols - 1) * gap) / cols;
   const int rows   = (n + cols - 1) / cols;
   const int avail  = (sh - STATUSBAR_H - TABBAR_H) - top - 8;   // content area minus top inset + bottom margin
   int tile_h = (avail - (rows - 1) * gap) / rows;
-  const int hi = big_grid ? 116 : 84;   // ceiling
-  const int lo = big_grid ? 78  : 54;   // floor: overflow scrolls instead of shrinking to tiny tiles
+  const int hi = CAP_COMPACT_UI ? 44 : big_grid ? 116 : 84;
+  const int lo = CAP_COMPACT_UI ? 44 : big_grid ? 78 : 54;
   if (tile_h > hi) tile_h = hi;
   if (tile_h < lo) tile_h = lo;
   for (int i = 0; i < n; i++) {
@@ -45772,13 +45892,14 @@ static void openAppDrawer() {
   // Keep the scrollbar permanently visible only when the grid actually overflows
   // the drawer area (so it's discoverable); when it all fits, hide it so there's
   // no misleading full-height thumb.
-  const int grid_h  = top + rows * tile_h + (rows - 1) * gap + 10 /*pad_bottom*/;
+  const int grid_h  = top + rows * tile_h + (rows - 1) * gap + (CAP_COMPACT_UI ? 4 : 10);
   const int visible = sh - STATUSBAR_H - TABBAR_H;
   lv_obj_set_scrollbar_mode(s_appdrawer_root,
                             grid_h > visible ? LV_SCROLLBAR_MODE_ON : LV_SCROLLBAR_MODE_OFF);
 
   // App-drawer settings cog — top-right, floats above the scrolling grid (does not
   // move with it). Opens the icon-size chooser (Compact / Large).
+#if !CAP_COMPACT_UI
   lv_obj_t* cog = lv_btn_create(s_appdrawer_root);
 #if CAP_KEYPAD_NAV
   s_nav_drawer_gear = cog;
@@ -45798,6 +45919,7 @@ static void openAppDrawer() {
   lv_obj_set_style_text_color(cogl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   lv_obj_center(cogl);
   lv_obj_move_foreground(cog);
+#endif
 }
 
 // Status-bar long-hold (3 s) -> full-screen screenshot to /screenshots on SD.
@@ -46228,6 +46350,9 @@ static void buildGlobalStatusBar() {
     // ROW 2's left, inside the corner inset — the status cluster occupies row-2 right.
     const lv_coord_t BH = 18, BW = 30, GAP = 6, BX0 = SB_INSET_X;
     const lv_coord_t BY = SB_TOP_PAD + SB_ROW + (SB_ROW - BH) / 2;
+#elif CAP_COMPACT_UI
+    const lv_coord_t BH = 16, BW = 24, GAP = 2, BX0 = 3;
+    const lv_coord_t BY = 1;
 #elif defined(TLORA_PAGER)
     // Match the compact status cluster instead of spanning most of the two-row
     // header. Keep all three actions in the first status-bar row, sharing its
@@ -47807,7 +47932,7 @@ static void buildBootSplash() {
 // over machinery that already works. Name + region are committed as the user
 // advances; Wi-Fi (optional) is committed on Finish, which then reboots once so
 // the radio re-inits with the chosen region and Wi-Fi associates.
-static const lv_coord_t kSetupBtnH = 40;
+static const lv_coord_t kSetupBtnH = CAP_COMPACT_UI ? 26 : 40;
 
 static void setupShowStep(int step);   // fwd: nav callbacks below call back into it
 static void setupFillRegionList();      // fwd: built by the region step + recoloured on tap
@@ -47826,7 +47951,7 @@ static lv_obj_t* setupBtn(const char* txt, lv_event_cb_t cb, bool primary,
   lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* l = lv_label_create(b);
   lv_label_set_text(l, TR(txt));
-  lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(l, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(l,
       lv_color_hex(primary ? COLOR_ON_STATUS_OK : COLOR_TEXT), LV_PART_MAIN);
   lv_obj_center(l);
@@ -47837,35 +47962,37 @@ static lv_obj_t* setupBtn(const char* txt, lv_event_cb_t cb, bool primary,
 // just below the header so the step body can stack under it.
 static int setupHeader(const char* title, const char* blurb, const char* step_tag) {
   const lv_coord_t sw = lv_disp_get_hor_res(nullptr);
+  const lv_coord_t edge = CAP_COMPACT_UI ? 6 : 12;
+  const lv_coord_t top = CAP_COMPACT_UI ? 4 : 12;
   lv_obj_t* t = lv_label_create(s_setup_root);
   lv_label_set_text(t, TR(title));
   lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(t, sw - 84);
-  lv_obj_set_style_text_font(t, &g_font_16, LV_PART_MAIN);
+  lv_obj_set_width(t, sw - (CAP_COMPACT_UI ? 72 : 84));
+  lv_obj_set_style_text_font(t, CAP_COMPACT_UI ? &g_font_14 : &g_font_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(t, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
-  lv_obj_set_pos(t, 12, 12);
+  lv_obj_set_pos(t, edge, top);
   // The title has LV_LABEL_LONG_WRAP at width sw-84, so it is NOT always one
   // line — a longer translation wraps and the hardcoded 24 px advance put the
   // blurb (and every step's content under it) straight through the title.
   lv_obj_update_layout(t);
-  int y = 12 + LV_MAX(24, lv_obj_get_height(t) + 2);
+  int y = top + LV_MAX(CAP_COMPACT_UI ? 17 : 24, lv_obj_get_height(t) + (CAP_COMPACT_UI ? 1 : 2));
   if (step_tag && step_tag[0]) {
     lv_obj_t* s = lv_label_create(s_setup_root);
     lv_label_set_text(s, step_tag);
     lv_obj_set_style_text_font(s, &g_font_12, LV_PART_MAIN);
     lv_obj_set_style_text_color(s, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
-    lv_obj_align(s, LV_ALIGN_TOP_RIGHT, -12, 16);
+    lv_obj_align(s, LV_ALIGN_TOP_RIGHT, CAP_COMPACT_UI ? -6 : -12, CAP_COMPACT_UI ? 5 : 16);
   }
   if (blurb && blurb[0]) {
     lv_obj_t* b = lv_label_create(s_setup_root);
     lv_label_set_text(b, TR(blurb));
     lv_label_set_long_mode(b, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(b, sw - 24);
-    lv_obj_set_style_text_font(b, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_width(b, sw - edge * 2);
+    lv_obj_set_style_text_font(b, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(b, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
-    lv_obj_set_pos(b, 12, y + 2);
+    lv_obj_set_pos(b, edge, y + (CAP_COMPACT_UI ? 0 : 2));
     lv_obj_update_layout(b);                 // resolve wrap height (1 or 2 lines)
-    y += 2 + lv_obj_get_height(b) + 4;
+    y += (CAP_COMPACT_UI ? 0 : 2) + lv_obj_get_height(b) + (CAP_COMPACT_UI ? 2 : 4);
   }
   return y;
 }
@@ -48000,10 +48127,10 @@ static void setupRegionRowCb(lv_event_t* e) {
 static void setupFillRegionList() {
   if (!s_setup_region_list) return;
   lv_obj_clean(s_setup_region_list);
-  const lv_coord_t rw = lv_disp_get_hor_res(nullptr) - 24 - 12;   // list width minus pad/scrollbar
+  const lv_coord_t rw = lv_disp_get_hor_res(nullptr) - (CAP_COMPACT_UI ? 20 : 36);   // list width minus pad/scrollbar
   for (int i = 0; i < (int)k_mesh_radio_preset_count; ++i) {
     lv_obj_t* r = lv_btn_create(s_setup_region_list);
-    lv_obj_set_size(r, rw, 34);
+    lv_obj_set_size(r, rw, CAP_COMPACT_UI ? 26 : 34);
     styleButton(r);
     lv_obj_set_style_bg_color(r, lv_color_hex(i == s_setup_region_sel ? COLOR_STATUS_OK : COLOR_CONTROL),
                               LV_PART_MAIN);
@@ -48014,7 +48141,7 @@ static void setupFillRegionList() {
     lv_label_set_text(l, k_mesh_radio_presets[i].label);
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
     lv_obj_set_width(l, rw - 16);
-    lv_obj_set_style_text_font(l, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
     lv_obj_align(l, LV_ALIGN_LEFT_MID, 8, 0);
   }
 }
@@ -48046,26 +48173,36 @@ static void setupShowStep(int step) {
 
   const lv_coord_t sw = lv_disp_get_hor_res(nullptr);
   const lv_coord_t sh = lv_disp_get_ver_res(nullptr);
-  const lv_coord_t btn_y = sh - kSetupBtnH - 10;
+  const lv_coord_t edge = CAP_COMPACT_UI ? 6 : 12;
+  const lv_coord_t btn_y = sh - kSetupBtnH - (CAP_COMPACT_UI ? 4 : 10);
+  const lv_coord_t back_w = CAP_COMPACT_UI ? 60 : 72;
+  const lv_coord_t next_w = CAP_COMPACT_UI ? 90 : 120;
 
   if (step == 0) {
-    setupHeader(TR("Welcome to WADAMESH"), nullptr, nullptr);
+    setupHeader("Welcome to WADAMESH", nullptr, nullptr);
+  #if !CAP_COMPACT_UI
     lv_obj_t* m = lv_label_create(s_setup_root);
     lv_label_set_text(m,
-        TR("Let's set up your device.\n\n"
-        "You'll pick a name and choose your LoRa region. Takes about a minute."));
+      TR("Let's set up your device.\n\nYou'll pick a name and choose your LoRa region. Takes about a minute."));
     lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(m, sw - 24);
-    lv_obj_set_style_text_font(m, &g_font_14, LV_PART_MAIN);
+    lv_obj_set_width(m, sw - edge * 2);
+    lv_obj_set_style_text_font(m, CAP_COMPACT_UI ? &g_font_12 : &g_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(m, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
-    lv_obj_set_pos(m, 12, 46);
-    setupBtn(TR("Skip"), setupSkipCb, false, 12, btn_y, 96);
-    setupBtn(TR("Get Started"), setupGetStartedCb, true, 12 + 96 + 8, btn_y, sw - 24 - 96 - 8);
+    lv_obj_set_pos(m, edge, 46);
+  #endif
+    const lv_coord_t skip_w = CAP_COMPACT_UI ? 60 : 96;
+    const lv_coord_t gap = CAP_COMPACT_UI ? 6 : 8;
+    setupBtn(TR("Skip"), setupSkipCb, false, edge, btn_y, skip_w);
+    setupBtn(TR("Get Started"), setupGetStartedCb, true,
+             edge + skip_w + gap, btn_y, sw - edge * 2 - skip_w - gap);
   } else if (step == 1) {
-    int y = setupHeader(TR("Choose your name"), TR("How you'll appear to other nodes. You can change this later in Settings."), TR("Step 1 of 3"));
+    int y = setupHeader("Choose your name",
+                        CAP_COMPACT_UI ? nullptr
+                                       : "How you'll appear to other nodes. You can change this later in Settings.",
+                        CAP_COMPACT_UI ? "1 / 3" : "Step 1 of 3");
     s_setup_name_ta = lv_textarea_create(s_setup_root);
-    lv_obj_set_size(s_setup_name_ta, sw - 24, 36);
-    lv_obj_set_pos(s_setup_name_ta, 12, y + 6);
+    lv_obj_set_size(s_setup_name_ta, sw - edge * 2, CAP_COMPACT_UI ? 28 : 36);
+    lv_obj_set_pos(s_setup_name_ta, edge, y + (CAP_COMPACT_UI ? 2 : 6));
     lv_textarea_set_one_line(s_setup_name_ta, true);
     taSetPlaceholder(s_setup_name_ta, TR("Your name"));
     lv_textarea_set_max_length(s_setup_name_ta, 30);
@@ -48074,37 +48211,46 @@ static void setupShowStep(int step) {
       if (cur && cur[0]) lv_textarea_set_text(s_setup_name_ta, cur);
     }
     attachSettingsTaEvents(s_setup_name_ta);
-    setupBtn(TR("Back"), setupBackCb, false, 12, btn_y, 72);
-    setupBtn(TR("Next"), setupNameNextCb, true, sw - 12 - 120, btn_y, 120);
+    setupBtn(TR("Back"), setupBackCb, false, edge, btn_y, back_w);
+    setupBtn(TR("Next"), setupNameNextCb, true, sw - edge - next_w, btn_y, next_w);
   } else if (step == 2) {
-    int y = setupHeader(TR("Choose your region"), TR("Every node you talk to must match. You can change this later in Settings."), TR("Step 2 of 3"));
+    int y = setupHeader("Choose your region",
+                        CAP_COMPACT_UI ? nullptr
+                                       : "Every node you talk to must match. You can change this later in Settings.",
+                        CAP_COMPACT_UI ? "2 / 3" : "Step 2 of 3");
     s_setup_region_list = lv_obj_create(s_setup_root);
     lv_obj_remove_style_all(s_setup_region_list);
-    lv_obj_set_size(s_setup_region_list, sw - 24, btn_y - (y + 6) - 8);
-    lv_obj_set_pos(s_setup_region_list, 12, y + 6);
+    const lv_coord_t list_y = y + (CAP_COMPACT_UI ? 2 : 6);
+    lv_obj_set_size(s_setup_region_list, sw - edge * 2,
+                    btn_y - list_y - (CAP_COMPACT_UI ? 3 : 8));
+    lv_obj_set_pos(s_setup_region_list, edge, list_y);
     lv_obj_set_flex_flow(s_setup_region_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_setup_region_list, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_setup_region_list, CAP_COMPACT_UI ? 2 : 4, LV_PART_MAIN);
     lv_obj_set_scroll_dir(s_setup_region_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_setup_region_list, LV_SCROLLBAR_MODE_AUTO);
     if (s_setup_region_sel < 0) s_setup_region_sel = findMatchingMeshRadioPreset(the_mesh.getNodePrefs());
     setupFillRegionList();
-    setupBtn(TR("Back"), setupBackCb, false, 12, btn_y, 72);
-    s_setup_region_next_btn = setupBtn(TR("Next"), setupRegionNextCb, true, sw - 12 - 120, btn_y, 120);
+    setupBtn(TR("Back"), setupBackCb, false, edge, btn_y, back_w);
+    s_setup_region_next_btn = setupBtn(TR("Next"), setupRegionNextCb, true,
+                                       sw - edge - next_w, btn_y, next_w);
   } else {
-    int y = setupHeader(TR("Wi-Fi & Bluetooth"), nullptr, TR("Step 3 of 3"));
+    int y = setupHeader("Wi-Fi & Bluetooth", nullptr,
+                        CAP_COMPACT_UI ? "3 / 3" : "Step 3 of 3");
+  #if !CAP_COMPACT_UI
     lv_obj_t* m = lv_label_create(s_setup_root);
     lv_label_set_text(m,
-        TR("This device can run Wi-Fi and Bluetooth at once, as a standalone radio and a "
-        "phone companion (MeshCore app) together.\n\n"
-        "Running both at the same time uses more RAM, so turn on only what you need.\n\n"
-        "Set them up anytime in Settings."));
+      TR("This device can run Wi-Fi and Bluetooth at once, as a standalone radio and a "
+         "phone companion (MeshCore app) together.\n\n"
+         "Running both at the same time uses more RAM, so turn on only what you need.\n\n"
+         "Set them up anytime in Settings."));
     lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(m, sw - 24);
+    lv_obj_set_width(m, sw - edge * 2);
     lv_obj_set_style_text_font(m, &g_font_12, LV_PART_MAIN);
     lv_obj_set_style_text_color(m, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
-    lv_obj_set_pos(m, 12, y + 6);
-    setupBtn(TR("Back"), setupBackCb, false, 12, btn_y, 72);
-    setupBtn(TR("Finish"), setupFinishCb, true, sw - 12 - 120, btn_y, 120);
+    lv_obj_set_pos(m, edge, y + 6);
+  #endif
+    setupBtn(TR("Back"), setupBackCb, false, edge, btn_y, back_w);
+    setupBtn(TR("Finish"), setupFinishCb, true, sw - edge - next_w, btn_y, next_w);
   }
 }
 
@@ -55300,6 +55446,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     // no font of its own calls it.
 #if CAP_ROUND_CORNERS
     STATUSBAR_H = SB_TOP_PAD + SB_ROW * 2;   // top safe-area + two rows (round phone panel)
+#elif CAP_COMPACT_UI
+  STATUSBAR_H = 18;
 #else
     STATUSBAR_H = SC(22);   // grow the status bar to fit bigger text at Large/Huge (no-op at 100%)
 #endif

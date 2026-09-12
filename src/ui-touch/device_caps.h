@@ -37,6 +37,7 @@
   #define CAP_LUA_APPS     0   // no PSRAM
   #define CAP_CONSOLE      0   // Console commands depend on the Lua host API
   #define CAP_MAP          0   // tile decoding needs more RAM than this board has
+  #define CAP_COMPACT_UI   1   // 240x135: use reduced shared chrome and row metrics
   #define WADA_LOW_RESOURCE_BOARD 1
 
 #elif defined(HAS_WIO_TRACKER_L2)          // ===== Seeed Wio Tracker L2 (ESP32-S3) =====
@@ -177,6 +178,10 @@
 
 #ifndef CAP_MAP
   #define CAP_MAP 1
+#endif
+
+#ifndef CAP_COMPACT_UI
+  #define CAP_COMPACT_UI 0
 #endif
 
 // Persisted, restart-to-apply UI-size selector. Large-screen boards already
