@@ -12,3 +12,5 @@ All bugs in this list are for the LilyGo T-Display P4 (`experimental` branch, `t
 ## 2. (raw) Bar under the icons on the nav bar isn't quite lining up.
 
 ## 3. (raw) When map isn't rendered the nav icons should be white so they're readable.
+
+## 4. (raw) Radio and mesh isn't remembering the preset after I leave the screen.
