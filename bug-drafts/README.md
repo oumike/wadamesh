@@ -8,3 +8,5 @@ All bugs in this list are for the LilyGo T-Display P4 (`experimental` branch, `t
 - Board: LilyGo T-Display P4
 - Symptom: GPS doesn't work.
 - Details: _TBD_
+
+## 2. (raw) Bar under the icons on the nav bar isn't quite lining up.
