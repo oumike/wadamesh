@@ -2,7 +2,7 @@
 
 Rewritten after the session history was lost on 2026-09-24. File these as issues on oumike/wadamesh once Issues are enabled.
 
-All bugs in this list are for the LilyGo T-Display P4 (`experimental` branch, `tdisplay_p4/`, `variants/tdisplay_p4/`).
+Unless marked otherwise, bugs are for the LilyGo T-Display P4 (`experimental` branch, `tdisplay_p4/`, `variants/tdisplay_p4/`).
 
 ## 1. T-Display P4: GPS is not working
 - Board: LilyGo T-Display P4
@@ -14,3 +14,5 @@ All bugs in this list are for the LilyGo T-Display P4 (`experimental` branch, `t
 ## 3. (raw) When map isn't rendered the nav icons should be white so they're readable.
 
 ## 4. (raw) Radio and mesh isn't remembering the preset after I leave the screen.
+
+## 5. (raw, ALL BUILDS — not P4-only) The navigational breadcrumb is on the right side of the screen it should be on the left like every other screen.
