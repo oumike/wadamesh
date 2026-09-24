@@ -16,3 +16,5 @@ Unless marked otherwise, bugs are for the LilyGo T-Display P4 (`experimental` br
 ## 4. (raw) Radio and mesh isn't remembering the preset after I leave the screen.
 
 ## 5. (raw, ALL BUILDS — not P4-only) The navigational breadcrumb is on the right side of the screen it should be on the left like every other screen.
+
+## 6. (raw) Verify the export is exporting everything it should.
