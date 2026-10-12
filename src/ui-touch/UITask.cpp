@@ -50309,6 +50309,16 @@ static void ccToggle(lv_obj_t* parent, const char* sym, const char* label,
                      : (s_look_more ? COLOR_HUE[HUE_SYS] : themeRole(0xC3CBCF, COLOR_SUB));
   lv_obj_set_style_radius(b, d * 28 / 100, LV_PART_MAIN);
   uint32_t icon_col;
+#if defined(HAS_TDECK_PRO)
+  // 1-bit e-paper: the light category hues (and the day border) threshold to white,
+  // which left an off tile's icon white on white. Ink only: outlined off, filled on.
+  lv_obj_set_style_border_color(b, lv_color_black(), LV_PART_MAIN);
+  lv_obj_set_style_border_width(b, 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(b, lv_color_black(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(b, active ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+  icon_col = active ? 0xFFFFFFu : 0x000000u;
+  (void)hue;
+#else
   if (s_theme_high_contrast) {
     // High contrast: an outlined square when off, solid text colour when on.
     lv_obj_set_style_border_color(b, lv_color_hex(active ? COLOR_TEXT : COLOR_BORDER), LV_PART_MAIN);
@@ -50329,6 +50339,7 @@ static void ccToggle(lv_obj_t* parent, const char* sym, const char* label,
       lv_obj_set_style_outline_opa(b, 50, LV_PART_MAIN);
     }
   }
+#endif
   styleLookPress(b);
   lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
   if (long_cat >= 0)   // holding it opens this feature's full settings page (ccTileHoldCb)
