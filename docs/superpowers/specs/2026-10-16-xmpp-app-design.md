@@ -56,7 +56,9 @@ immutable). One file, one dependency (`slixmpp`), plus a `Dockerfile`,
   autoincrement. The last 50 messages per conversation are kept (configurable).
   Deduplicated by stanza ID so MAM backfill and live delivery cannot double up.
 - **Device side.** `POST /w`, sealed body in, sealed body out (section 2). Any
-  request that fails the seal check gets a bare `403` and is not parsed.
+  request that fails the seal check gets `200` with the plain body `DENIED`
+  and is not parsed. (Not `403`: `wada.net` reports every non-2xx status as
+  `-1`, so the app could not tell a rejection from an unreachable relay.)
   Python's built-in `asyncio` HTTP handling on the same event loop as slixmpp;
   no web framework.
 - **Config** (`relay.ini`): `jid`, `password`, `passphrase`, `listen`
@@ -101,16 +103,22 @@ dir       = "Q" for requests, "P" for replies
   `wada.store`, never the passphrase. 2000 rounds is about 4000 native HMAC
   calls; it is split across timer callbacks so no single callback approaches
   the 100k-instruction budget.
-- **Replay protection.** Every request carries a sequence number `q` that must be
-  greater than the last one the relay accepted (the relay persists the highest
-  `q`). The app does not write `wada.store` per request (flash wear): it
-  reserves blocks of 1000, writing `next_block` once when the app opens and once
-  per 1000 requests. Numbers skipped by a reservation are simply never used.
+- **Replay protection.** Setup generates a random 64-bit session ID `sid`
+  (stored). Every request carries `sid` and a sequence number `q` that must be
+  greater than the last `q` the relay accepted for that `sid`; the relay
+  persists the highest `q` per `sid`, so a Reset or reinstall (new `sid`)
+  starts cleanly while old captured requests stay dead. The app does not write
+  `wada.store` per request (flash wear): it reserves blocks of 1000, writing
+  `qb` once when the app opens and once per 1000 requests. Numbers skipped by a
+  reservation are never used.
+- **Reply binding.** Every reply starts with `P <q>` echoing the request's `q`;
+  the app drops a reply whose `q` does not match, so an old reply cannot be
+  replayed at the device.
 
 ### Sync request (plaintext)
 
 ```
-S <q> <cursor>
+S <sid> <q> <cursor>
 M <conv-id> <client-msg-id> <text>     zero or more: outgoing messages
 R <conv-id> <seq>                      zero or more: read up to <seq>
 ```
@@ -118,6 +126,8 @@ R <conv-id> <seq>                      zero or more: read up to <seq>
 ### Sync reply (plaintext)
 
 ```
+P <q>                                                     always first
+E xmpp-offline                                            only while the relay is not logged in
 C <conv-id> <chat|room> <jid> <name> <presence> <unread>   changed conversations only
 G <conv-id> <seq> <unix-time> <sender> <text>              new messages, ascending seq
 A <client-msg-id> <ok|err> [reason]                         result of each M line
@@ -126,11 +136,21 @@ N <cursor> <more:0|1>
 
 - Fields are tab-separated; in text, `\t`, `\n` and `\\` are escaped as `\\t`,
   `\\n`, `\\\\`.
+- `sender` is the contact's bare JID in chats, the occupant nick in rooms, and
+  empty for the user's own messages (sent from this device or, via carbons and
+  room reflection, from another client).
 - `presence` is one of `on`, `away`, `off` (rooms: `on` when joined).
 - Conversation IDs are small integers the relay assigns; the JID travels only on
   the `C` line.
-- `cursor` is the highest `seq` the device has. Cursor `0` (first run, or after
-  "Reset") gets every conversation plus the last 10 messages of each.
+- `cursor` is the highest `seq` (or conversation revision) the device has.
+  Messages and conversation changes share one revision counter, so "changed
+  since cursor" covers both. The app keeps the cursor in RAM only and starts
+  every open at `0`: with no device-side history it needs a fresh window
+  anyway, and it avoids a flash write per sync.
+- **Initial sync (`cursor = 0`)** returns every conversation and the newest
+  messages of each, up to 10 per conversation, picked round-robin from newest
+  down until the reply budget is full. It is never paged: `N` carries the
+  relay's current revision and `more = 0`.
 - A reply stays under ~6 KB of plaintext so it can be opened in one callback
   (decrypting costs roughly 3–5 VM instructions per byte). When `more = 1` the
   app syncs again immediately instead of waiting 5 s.
@@ -171,7 +191,7 @@ N <cursor> <more:0|1>
 | Condition | Behaviour |
 |---|---|
 | No Wi-Fi / relay unreachable / timeout | Header shows "Relay unreachable"; retry every 5 s, backing off to 30 s after 6 failures; queued sends kept and resent |
-| `403` (wrong passphrase, or `q` replayed) | "Passphrase rejected — check Settings"; polling stops until settings change |
+| Body `DENIED` (wrong passphrase, or `q` replayed) | "Passphrase rejected — check Settings"; polling stops until settings change |
 | Reply fails the tag check | Dropped, counted, treated like a timeout; three in a row shows "Relay reply corrupted" |
 | Relay up but not logged in to XMPP | Relay answers `N` plus an `E xmpp-offline` line; header shows "Relay offline from XMPP"; sends return `err offline` |
 | Send rejected by server (e.g. room kicked) | `A ... err <reason>`; message marked `!` |
