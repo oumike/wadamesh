@@ -625,6 +625,82 @@ def load_config(path: str) -> Config:
                   host.strip("[]") or "0.0.0.0", port, keep, db)
 
 
+# ---------------------------------------------------------------- session helpers
+
+CONTACT_SUBSCRIPTIONS = ("to", "from", "both")
+LIVE_HOLD_MAX = 2000
+
+
+def is_contact(subscription, pending_out=False) -> bool:
+    """A real roster contact. slixmpp's client_roster also holds every JID that
+    ever sent us presence (room occupants, strangers) with subscription none."""
+    return subscription in CONTACT_SUBSCRIPTIONS or bool(pending_out)
+
+
+def chat_conv(history, rooms, jid, name):
+    """Conversation id for a 1:1 chat with jid, or None when jid is a room
+    (joined now, or already stored as kind 'room'): a room is never
+    downgraded to 'chat'."""
+    if jid in rooms:
+        return None
+    with history.lock:
+        row = history.db.execute(
+            "SELECT kind FROM conversations WHERE jid = ?", (jid,)).fetchone()
+    if row is not None and row[0] == "room":
+        return None
+    return history.conv_for(jid, "chat", name)
+
+
+def apply_subscription_policy(client):
+    """Never answer subscription requests on the user's account: pending
+    requests are left for the user's normal client. In slixmpp these settings
+    live on the roster (client.roster), which passes them to every node."""
+    client.roster.auto_authorize = None
+    client.roster.auto_subscribe = False
+
+
+class LiveGate:
+    """Holds live inbound work while MAM backfill runs, so older backfilled
+    messages get lower seqs than live ones arriving meanwhile (pruning is by
+    seq). Past LIVE_HOLD_MAX held items new work runs at once rather than
+    being dropped."""
+
+    def __init__(self, cap=LIVE_HOLD_MAX):
+        self.cap = cap
+        self.held = None
+
+    def hold(self):
+        if self.held is None:
+            self.held = []
+
+    def submit(self, fn):
+        if self.held is None or len(self.held) >= self.cap:
+            fn()
+        else:
+            self.held.append(fn)
+
+    def release(self):
+        held, self.held = self.held or [], None
+        for fn in held:
+            try:
+                fn()
+            except Exception:
+                log.exception("held message handling failed")
+
+
+def apply_backfill(newest_first, ingest_one) -> int:
+    """MAM results arrive newest first (reverse query); store oldest first so
+    seq follows time. -> number stored."""
+    added = 0
+    for res in reversed(list(newest_first)):
+        try:
+            if ingest_one(res):
+                added += 1
+        except Exception:
+            log.exception("MAM result handling failed")
+    return added
+
+
 # ---------------------------------------------------------------- XMPP session
 
 PLUGINS = ("xep_0030", "xep_0045", "xep_0048", "xep_0402", "xep_0280",
@@ -632,7 +708,6 @@ PLUGINS = ("xep_0030", "xep_0045", "xep_0048", "xep_0402", "xep_0280",
 RECONNECT_MIN = 5
 RECONNECT_MAX = 300
 MAM_PAGE = 50
-MAM_MAX = 500           # cap per backfill query
 MAM_SLACK = 60          # seconds re-queried before newest stored message
 NS_BOOKMARKS2 = "urn:xmpp:bookmarks:1"
 NS_SID = "{urn:xmpp:sid:0}"
@@ -710,6 +785,8 @@ def _session_class():
             self._reconnect_pending = False
             self.stopping = False
             self.use_origin_id = True    # outgoing <origin-id/> = message id = cmid
+            apply_subscription_policy(self)
+            self.gate = LiveGate()
             for p in PLUGINS:
                 cfg = {"keepalive": True, "interval": 60} if p == "xep_0199" else None
                 self.register_plugin(p, pconfig=cfg)
@@ -781,25 +858,28 @@ def _session_class():
         async def _on_session_start(self, _):
             log.info("session started as %s", self.boundjid)
             self._backoff = RECONNECT_MIN
-            self.send_presence()
+            # Live messages wait until backfill is stored (seq follows time),
+            # and the device sees xmpp-offline until then, so its sends are
+            # not interleaved with backfill either.
+            self.gate.hold()
             try:
-                await self.get_roster(timeout=30)
-            except Exception as e:
-                log.warning("roster fetch failed: %r", e)
-            own = self.boundjid.bare
-            n = 0
-            for jid in list(self.client_roster):
-                if jid != own:
-                    self._contact_conv(jid)
-                    n += 1
-            log.info("roster has %d contacts", n)
-            self.online = True
-            try:
-                await self["xep_0280"].enable(timeout=15)
-            except Exception as e:
-                log.warning("carbons not enabled: %r", e)
-            await self._join_rooms()
-            await self._backfill()
+                self.send_presence()
+                try:
+                    await self.get_roster(timeout=30)
+                except Exception as e:
+                    log.warning("roster fetch failed: %r", e)
+                log.info("roster has %d contacts", self._sync_roster())
+                try:
+                    await self["xep_0280"].enable(timeout=15)
+                except Exception as e:
+                    log.warning("carbons not enabled: %r", e)
+                await self._join_rooms()
+                await self._backfill()
+            finally:
+                self.gate.release()
+            if self.is_connected():
+                self.online = True
+                log.info("ready")
 
         # ------------------------------------------------ roster and presence
 
@@ -809,9 +889,22 @@ def _session_class():
             return jid
 
         def _contact_conv(self, jid):
-            conv = self.history.conv_for(jid, "chat", self._contact_name(jid))
-            self._update_presence(jid, conv)
+            conv = chat_conv(self.history, self.rooms, jid, self._contact_name(jid))
+            if conv is not None:
+                self._update_presence(jid, conv)
             return conv
+
+        def _sync_roster(self):
+            own = self.boundjid.bare
+            n = 0
+            for jid in list(self.client_roster):
+                if jid == own or not self.client_roster.has_jid(jid):
+                    continue
+                item = self.client_roster[jid]
+                if is_contact(item["subscription"], item["pending_out"]) \
+                        and self._contact_conv(jid) is not None:
+                    n += 1
+            return n
 
         def _update_presence(self, jid, conv):
             res = self.client_roster[jid].resources if self.client_roster.has_jid(jid) else {}
@@ -838,10 +931,7 @@ def _session_class():
 
         def _on_roster_update(self, _):
             try:
-                own = self.boundjid.bare
-                for jid in list(self.client_roster):
-                    if jid != own:
-                        self._contact_conv(jid)
+                self._sync_roster()
             except Exception:
                 log.exception("roster update failed")
 
@@ -887,7 +977,7 @@ def _session_class():
             nick = self.boundjid.user or "wada"
             joined = 0
             for room, (name, password) in (await self._bookmarks()).items():
-                if not self.online:
+                if not self.is_connected():
                     break
                 try:
                     pres, _, _, _ = await self["xep_0045"].join_muc_wait(
@@ -958,24 +1048,28 @@ def _session_class():
                 conv = self.history.conv_for(peer, "room", self.room_names.get(peer, peer))
                 by = peer
             else:
-                conv = self.history.conv_for(peer, "chat", self._contact_name(peer))
+                conv = chat_conv(self.history, self.rooms, peer, self._contact_name(peer))
+                if conv is None:
+                    return False
                 by = own
             return ingest(self.history, conv, self._ids(msg, by, archive_id), ts,
                           sender, body) is not None
 
+        def _ingest_live(self, msg, ts):
+            def run():
+                try:
+                    self._ingest(msg, ts)
+                except Exception:
+                    log.exception("message handling failed")
+            self.gate.submit(run)
+
         def _on_message(self, msg):
             if msg["type"] in ("groupchat", "error"):
                 return
-            try:
-                self._ingest(msg, stamp(msg))
-            except Exception:
-                log.exception("message handling failed")
+            self._ingest_live(msg, stamp(msg))
 
         def _on_groupchat(self, msg):
-            try:
-                self._ingest(msg, stamp(msg))
-            except Exception:
-                log.exception("room message handling failed")
+            self._ingest_live(msg, stamp(msg))
 
         def _on_carbon(self, msg):
             try:
@@ -985,7 +1079,7 @@ def _session_class():
                 else:
                     inner = msg["carbon_sent"]
                 if isinstance(inner, Message):
-                    self._ingest(inner, stamp(inner))
+                    self._ingest_live(inner, stamp(inner))
             except Exception:
                 log.exception("carbon handling failed")
 
@@ -1004,31 +1098,20 @@ def _session_class():
                 log.info("backfilled %d messages for %s", n, room)
 
         async def _mam(self, room, since, cap):
-            kw = {"rsm": {"max": MAM_PAGE}}
+            # Newest first, bounded below by what we already have, so after a
+            # long outage it is the newest `cap` messages that are fetched.
+            kw = {"rsm": {"max": MAM_PAGE}, "reverse": True, "total": cap}
             if room:
                 kw["jid"] = JID(room)
-            if since is None:
-                kw["reverse"] = True
-                kw["total"] = cap
-            else:
+            if since is not None:
                 kw["start"] = datetime.fromtimestamp(max(0, since - MAM_SLACK), timezone.utc)
-                kw["total"] = MAM_MAX
             got = []
             try:
                 async for res in self["xep_0313"].iterate(**kw):
                     got.append(res)
             except Exception as e:
                 log.warning("MAM query for %s failed: %r", room or "account", e)
-            if since is None:
-                got.reverse()
-            added = 0
-            for res in got:
-                try:
-                    if self._ingest_mam(res):
-                        added += 1
-                except Exception:
-                    log.exception("MAM result handling failed")
-            return added
+            return apply_backfill(got, self._ingest_mam)
 
         def _ingest_mam(self, res):
             r = res["mam_result"]

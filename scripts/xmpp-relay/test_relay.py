@@ -279,6 +279,7 @@ class SyncTests(unittest.TestCase):
 
 
 import asyncio
+import importlib.util
 
 
 def _seal_req(keys, text):
@@ -504,6 +505,113 @@ class DevicePortTests(unittest.TestCase):
         self.assertEqual(s.got, [(3, "hi", "c1")])
         s.online = False
         self.assertFalse(p.online)
+
+
+class FakeRosterItem(dict):
+    pass
+
+
+class SessionHelperTests(unittest.TestCase):
+    def setUp(self):
+        self.h = r.History(_tmpdb())
+
+    def test_roster_rooms_and_strangers_not_contacts(self):
+        # what slixmpp's client_roster holds after presence from a room and a stranger
+        roster = {
+            "friend@x": FakeRosterItem(subscription="both", pending_out=False),
+            "asked@x": FakeRosterItem(subscription="none", pending_out=True),
+            "room@c.x": FakeRosterItem(subscription="none", pending_out=False),
+            "stranger@x": FakeRosterItem(subscription="none", pending_out=False),
+        }
+        room = self.h.conv_for("room@c.x", "room", "Room")
+        rev = self.h.rev()
+        made = {}
+        for jid, item in roster.items():
+            if r.is_contact(item["subscription"], item["pending_out"]):
+                made[jid] = r.chat_conv(self.h, {}, jid, jid)
+        self.assertEqual(sorted(made), ["asked@x", "friend@x"])
+        kinds = dict(self.h.db.execute("SELECT jid, kind FROM conversations"))
+        self.assertEqual(kinds, {"room@c.x": "room", "friend@x": "chat", "asked@x": "chat"})
+        # even if something asks for the room as a chat, it is never downgraded
+        self.assertIsNone(r.chat_conv(self.h, {}, "room@c.x", "room@c.x"))
+        self.assertIsNone(r.chat_conv(self.h, {"other@c.x": "me"}, "other@c.x", "x"))
+        self.assertEqual(self.h.db.execute(
+            "SELECT kind, name FROM conversations WHERE id=?", (room,)).fetchone(),
+            ("room", "Room"))
+        self.assertNotIn("other@c.x", dict(self.h.db.execute(
+            "SELECT jid, kind FROM conversations")))
+        for sub in ("to", "from", "both"):
+            self.assertTrue(r.is_contact(sub))
+        for sub in ("none", "remove", ""):
+            self.assertFalse(r.is_contact(sub))
+        self.assertGreater(self.h.rev(), rev)
+
+    def test_subscription_policy(self):
+        class Roster:
+            auto_authorize = True
+            auto_subscribe = True
+
+        class Client:
+            roster = Roster()
+        c = Client()
+        r.apply_subscription_policy(c)
+        self.assertIsNone(c.roster.auto_authorize)
+        self.assertIs(c.roster.auto_subscribe, False)
+
+    @unittest.skipUnless(importlib.util.find_spec("slixmpp"), "slixmpp not installed")
+    def test_session_subscription_policy(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            s = r.XmppSession("me@example.org/relay", "pw", self.h)
+            self.assertIsNone(s.roster.auto_authorize)
+            self.assertIs(s.roster.auto_subscribe, False)
+            node = s.client_roster
+            self.assertIsNone(node.auto_authorize)
+            self.assertIs(node.auto_subscribe, False)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_live_during_backfill_gets_higher_seq(self):
+        h = self.h
+        c = h.conv_for("bob@x", "chat", "Bob")
+        gate = r.LiveGate()
+        gate.hold()
+        # a live message arrives while backfill is in flight: held
+        gate.submit(lambda: r.ingest(h, c, ["live1"], 2000, "bob@x", "live"))
+        self.assertEqual(h.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+        # reverse MAM query: newest first
+        newest_first = [("a3", 1003), ("a2", 1002), ("a1", 1001)]
+        n = r.apply_backfill(newest_first,
+                             lambda res: r.ingest(h, c, [res[0]], res[1], "bob@x", res[0]))
+        self.assertEqual(n, 3)
+        gate.release()
+        rows = h.db.execute("SELECT seq, stanza_id, ts FROM messages ORDER BY seq").fetchall()
+        self.assertEqual([x[1] for x in rows], ["a1", "a2", "a3", "live1"])
+        self.assertEqual([x[2] for x in rows], sorted(x[2] for x in rows))
+        # after release, live work runs immediately again
+        gate.submit(lambda: r.ingest(h, c, ["live2"], 2001, "bob@x", "x"))
+        self.assertEqual(h.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 5)
+
+    def test_live_gate_overflow_runs_instead_of_dropping(self):
+        ran = []
+        g = r.LiveGate(cap=2)
+        g.hold()
+        for i in range(4):
+            g.submit(lambda i=i: ran.append(i))
+        self.assertEqual(ran, [2, 3])
+        g.release()
+        self.assertEqual(ran, [2, 3, 0, 1])
+
+    def test_backfill_keeps_newest_when_over_keep(self):
+        h = r.History(_tmpdb(), keep=5)
+        c = h.conv_for("bob@x", "chat", "Bob")
+        newest_first = [("m%02d" % i, 1000 + i) for i in range(9, -1, -1)][:5]
+        r.apply_backfill(newest_first,
+                         lambda res: r.ingest(h, c, [res[0]], res[1], "bob@x", res[0]))
+        ids = [x[0] for x in h.db.execute("SELECT stanza_id FROM messages ORDER BY seq")]
+        self.assertEqual(ids, ["m05", "m06", "m07", "m08", "m09"])
 
 
 class ConfigTests(unittest.TestCase):
