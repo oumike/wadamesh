@@ -185,6 +185,12 @@ N <cursor> <more:0|1>
   `"too fast"` answer just leaves the batch for the next flush. The card copy
   is not encrypted; the setting's description says so. Opening a chat with SD
   history on loads the tail of its log so scroll-back goes past 50 messages.
+  **History is never written to internal flash.** `caps.sd` only means the
+  board has a slot, and several boards keep `wada.fs` on internal flash when no
+  card was present at boot. The app offers and writes history only when the
+  host reports `caps().fs_sd == true` (the app filesystem is the SD card right
+  now); a missing `fs_sd` (older firmware) means off. Any write error stops
+  logging for the session; nothing falls back to flash.
 
 ## 4. Errors
 
