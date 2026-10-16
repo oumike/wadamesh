@@ -3042,10 +3042,10 @@ scenarios.xmpp_chat = function()
   assert(has_button("Settings"), "list screen has Settings")
   local rows = xm_rows()
   assert(#rows == 4, "four conversations: " .. table.concat(rows, " / "))
-  xm_row_is(1, "● Alice  (2)")      -- unread first
-  xm_row_is(2, "◐ Bob")             -- then latest message seq (14)
+  xm_row_is(1, "• Alice  (2)")      -- unread first
+  xm_row_is(2, "~ Bob")             -- then latest message seq (14)
   xm_row_is(3, "# Lounge")          -- (12)
-  xm_row_is(4, "○ Dave")            -- (no messages)
+  xm_row_is(4, "- Dave")            -- (no messages)
   xm_assert_layout("list")
   -- open Alice: header = name, plain rows, R for the newest seq on the next request
   xm_pick(1)
@@ -3058,8 +3058,8 @@ scenarios.xmpp_chat = function()
   assert(log[#log].raw:find("\nR\t1\t10\n", 1, true), "R line in the request")
   press("Back")
   xm_tick(app)
-  xm_row_is(1, "◐ Bob")
-  xm_row_is(3, "● Alice")         -- read: no count, back in activity order
+  xm_row_is(1, "~ Bob")
+  xm_row_is(3, "• Alice")         -- read: no count, back in activity order
   -- a room: sender prefix, own messages "> " in the accent colour
   xm_pick_text("# Lounge")
   assert(xm_label("Lounge"), "room header")
@@ -3070,7 +3070,7 @@ scenarios.xmpp_chat = function()
   assert(l.rows[1].color ~= wada.ui.colors.accent, "others not in the accent colour")
   press("Back")
   -- Write in a chat: pending " …" until A ok, then the relay's copy only
-  xm_pick_text("◐ Bob")
+  xm_pick_text("~ Bob")
   xm_row_is(1, "yo")
   xm_row_is(2, "you there?")
   cfg.inputs = { false }
@@ -3192,19 +3192,29 @@ scenarios.xmpp_m9 = function()
   xm_until(app, function() return #log >= 1 and net_pending == nil end, 4)
   xm_tick(app)
   assert(#xm_rows() == 4, "list built: " .. xm_screen_text())
+  for i = 1, 4 do assert(xm_list().rows[i].fn, "conversation row " .. i .. " is not pressable") end
+  assert(has_button("Settings"), "Settings is a button")
   xm_assert_layout("m9 list")
-  -- enter on a focused row opens it; backspace goes back
+  -- The firmware only runs its own focus navigation (arrows move between
+  -- buttons and list rows, enter presses) for apps WITHOUT on_input; declaring
+  -- one routes every key to the app instead (UITask.cpp, luaAppHasOnInput).
+  -- key() here does not model that gate, so assert it directly.
+  assert(app.on_input == nil, "on_input would switch off keyboard navigation on the M9")
+  -- enter on a focused row opens it; the Back button returns
   xm_pick(2)
   assert(xm_label("Bob") and #xm_rows() == 2, "chat built: " .. xm_screen_text())
+  assert(has_button("Back") and has_button("Write"), "chat actions are buttons")
   xm_assert_layout("m9 chat")
-  key(app, "backspace", 8)
-  assert(has_button("Settings") and #xm_rows() == 4, "backspace returns to the list: " .. xm_screen_text())
+  press("Back")
+  assert(has_button("Settings") and #xm_rows() == 4, "Back returns to the list: " .. xm_screen_text())
   press("Settings")
   xm_assert_layout("m9 settings")
   xm_row_is(1, "Relay URL")
   xm_row_is(2, "Passphrase")
   xm_row_is(3, "Keep history on SD card: Off")
   xm_row_is(4, "Reset")
+  for i = 1, 4 do assert(xm_list().rows[i].fn, "settings row " .. i .. " is not pressable") end
+  assert(has_button("Back"), "settings Back is a button")
   assert(xm_label("Stored unencrypted on the card."), "SD description: " .. xm_screen_text())
   xm_pick(3)
   assert(storekv.sd == "1", "SD on stores sd=1")

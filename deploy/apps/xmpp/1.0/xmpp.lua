@@ -589,12 +589,16 @@ end
 -- text or colour changed, and only when S.rev moved. An idle tick touches no
 -- widget, and the list keeps its scroll position and keyboard focus.
 -- Keyboard / trackball boards: list rows and buttons are focus stops in creation
--- order, so every screen creates its buttons first, above its list.
+-- order, so every screen creates its buttons first, above its list. There is
+-- deliberately no app.on_input: declaring one makes the firmware send every key
+-- to the app and turns its focus navigation off (UITask.cpp), so every action
+-- here is a button or a list row.
 -- Long rows: a list row's label has a fixed width and content height, so the
 -- firmware wraps long text inside the row; no wrapping is done here.
 
 local ui = { rows = {}, cols = {}, ids = {} }
-local DOTS = { on = "●", away = "◐" }          -- anything else is "○"; rooms are "#"
+-- ASCII / U+2022 only: the firmware fonts have no U+25xx circles (R9)
+local DOTS = { on = "•", away = "~" }          -- anything else is "-"; rooms are "#"
 local EMPTY = "No contacts or rooms yet. Add contacts or bookmark rooms from another XMPP client."
 local SD_ROW, SD_DESC = "Keep history on SD card", "Stored unencrypted on the card."
 local RESET_ROW, RESET_CONFIRM = "Reset", "Reset: press again to forget the relay keys"
@@ -705,7 +709,7 @@ end
 
 -- ---- conversation list
 local function conv_row(c)
-  local dot = c.kind == "room" and "#" or DOTS[c.presence] or "○"
+  local dot = c.kind == "room" and "#" or DOTS[c.presence] or "-"
   local name = (c.name and c.name ~= "") and c.name or c.jid or "?"
   local s = dot .. " " .. name
   if (c.unread or 0) > 0 then s = s .. "  (" .. c.unread .. ")" end
@@ -897,14 +901,6 @@ function app.on_tick()
       ui.confirm = nil
       refresh_settings()
     end
-  end
-end
-
--- backspace leaves a chat or the settings (rows and buttons need no handling:
--- the firmware's focus navigation presses them)
-function app.on_input(ev)
-  if ev.type == "key" and ev.key == "backspace" and (ui.screen == "chat" or ui.screen == "settings") then
-    show_list()
   end
 end
 
