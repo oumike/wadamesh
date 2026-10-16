@@ -277,5 +277,267 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(c2[6], "0")
 
 
+
+import asyncio
+
+
+def _seal_req(keys, text):
+    return r.seal(keys[0], keys[1], b"Q", text.encode("utf-8"))
+
+
+def _open_rep(keys, body):
+    pt = r.open_sealed(keys[0], keys[1], b"P", body)
+    return None if pt is None else pt.decode("utf-8")
+
+
+class BoomHandler:
+    def handle(self, text):
+        raise RuntimeError("boom")
+
+
+class HandleBodyTests(unittest.TestCase):
+    def setUp(self):
+        self.keys = r.derive_keys("hunter2")
+        self.h, self.x, self.sh, self.ids = _handler(convs=1, msgs=2)
+
+    def test_handle_body_denied(self):
+        self.assertEqual(r.handle_body(b"garbage", self.keys, self.sh, self.h), b"DENIED")
+        self.assertEqual(r.handle_body(b"", self.keys, self.sh, self.h), b"DENIED")
+        other = r.derive_keys("wrong")
+        self.assertEqual(r.handle_body(_seal_req(other, "S\ts\t1\t0\n"),
+                                       self.keys, self.sh, self.h), b"DENIED")
+        # sealed but not a request
+        self.assertEqual(r.handle_body(_seal_req(self.keys, "hello"),
+                                       self.keys, self.sh, self.h), b"DENIED")
+        body = _seal_req(self.keys, "S\ts\t5\t0\n")
+        self.assertNotEqual(r.handle_body(body, self.keys, self.sh, self.h), b"DENIED")
+        # replayed q (same and lower) is denied
+        self.assertEqual(r.handle_body(body, self.keys, self.sh, self.h), b"DENIED")
+        self.assertEqual(r.handle_body(_seal_req(self.keys, "S\ts\t4\t0\n"),
+                                       self.keys, self.sh, self.h), b"DENIED")
+
+    def test_handle_body_ok(self):
+        out = r.handle_body(_seal_req(self.keys, "S\ts\t7\t0\n"), self.keys, self.sh, self.h)
+        text = _open_rep(self.keys, out)
+        self.assertIsNotNone(text)
+        self.assertTrue(text.startswith("P\t7\n"))
+        ls = _lines(text)
+        self.assertEqual(ls[-1][0], "N")
+        self.assertEqual(sum(1 for l in ls if l[0] == "G"), 2)
+        # a reply never opens as a request (direction bound)
+        self.assertIsNone(r.open_sealed(self.keys[0], self.keys[1], b"Q", out))
+
+    def test_handle_body_internal_error_still_replies(self):
+        with self.assertLogs("xmpp-relay", "ERROR"):
+            out = r.handle_body(_seal_req(self.keys, "S\ts\t3\t42\n"),
+                                self.keys, BoomHandler(), self.h)
+        text = _open_rep(self.keys, out)
+        self.assertEqual(_lines(text), [["P", "3"], ["N", "42", "0"]])
+
+
+async def _raw(port, data):
+    rd, wr = await asyncio.open_connection("127.0.0.1", port)
+    wr.write(data)
+    await wr.drain()
+    resp = await rd.read()
+    wr.close()
+    head, _, body = resp.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    status = int(lines[0].split()[1])
+    hdrs = {}
+    for l in lines[1:]:
+        k, _, v = l.partition(b":")
+        hdrs[k.strip().lower().decode()] = v.strip().decode()
+    return status, hdrs, body
+
+
+class HttpTests(unittest.TestCase):
+    def test_http_roundtrip(self):
+        calls = []
+
+        def on_body(b):
+            calls.append(b)
+            return b"R:" + b
+
+        async def go():
+            srv = await r.serve_http("127.0.0.1", 0, on_body)
+            port = srv.sockets[0].getsockname()[1]
+            payload = bytes(range(256)) + b"\r\n\r\n\x00"
+            res = {}
+            res["ok"] = await _raw(port, b"POST /w HTTP/1.1\r\nHost: x\r\n"
+                                   b"Content-Type: application/octet-stream\r\n"
+                                   b"Content-Length: %d\r\n\r\n" % len(payload) + payload)
+            res["get"] = await _raw(port, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            res["path"] = await _raw(port, b"POST /x HTTP/1.1\r\nContent-Length: 1\r\n\r\nz")
+            res["big"] = await _raw(port, b"POST /w HTTP/1.1\r\nContent-Length: 99999\r\n\r\n")
+            res["nolen"] = await _raw(port, b"POST /w HTTP/1.1\r\nHost: x\r\n\r\n")
+            res["junk"] = await _raw(port, b"\x00\x01garbage\r\n\r\n")
+            srv.close()
+            await srv.wait_closed()
+            return payload, res
+
+        payload, res = asyncio.run(go())
+        st, hd, body = res["ok"]
+        self.assertEqual(st, 200)
+        self.assertEqual(body, b"R:" + payload)
+        self.assertEqual(hd["content-type"], "application/octet-stream")
+        self.assertEqual(hd["connection"], "close")
+        self.assertEqual(int(hd["content-length"]), len(body))
+        self.assertEqual(res["get"][0], 404)
+        self.assertEqual(res["path"][0], 404)
+        self.assertEqual(res["big"][0], 413)
+        self.assertGreaterEqual(res["nolen"][0], 400)
+        self.assertGreaterEqual(res["junk"][0], 400)
+        self.assertEqual(calls, [payload])
+
+    def test_http_on_body_error_does_not_kill_server(self):
+        def on_body(b):
+            if b == b"x":
+                raise RuntimeError("boom")
+            return b"ok"
+
+        async def go():
+            srv = await r.serve_http("127.0.0.1", 0, on_body)
+            port = srv.sockets[0].getsockname()[1]
+            a = await _raw(port, b"POST /w HTTP/1.1\r\nContent-Length: 1\r\n\r\nx")
+            b = await _raw(port, b"POST /w HTTP/1.1\r\nContent-Length: 1\r\n\r\ny")
+            srv.close()
+            await srv.wait_closed()
+            return a, b
+
+        with self.assertLogs("xmpp-relay", "ERROR"):
+            a, b = asyncio.run(go())
+        self.assertEqual(a[0], 500)
+        self.assertEqual((b[0], b[2]), (200, b"ok"))
+
+
+class InboundTests(unittest.TestCase):
+    def setUp(self):
+        self.h = r.History(_tmpdb())
+
+    def test_room_reflection_dedup(self):
+        room = self.h.conv_for("room@conf.x", "room", "Room")
+        x = FakeXmpp()
+        sh = r.SyncHandler(self.h, x)
+        sh.handle("S\ts\t1\t0\nM\t%d\tcmid42\thi all\n" % room)
+        n = self.h.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        self.assertEqual(n, 1)
+        # the room reflects our message: origin-id = cmid, plus the room's stanza-id
+        self.assertIsNone(r.ingest(self.h, room, ["cmid42", "room-sid-1"], 5, "", "hi all"))
+        # MAM backfill later carries the archive id first, origin-id inside
+        self.assertIsNone(r.ingest(self.h, room, ["room-sid-1", "cmid42"], 5, "", "hi all"))
+        self.assertEqual(self.h.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
+
+    def test_ingest_dedups_on_any_id(self):
+        c = self.h.conv_for("a@x", "chat", "A")
+        self.assertIsNotNone(r.ingest(self.h, c, [None, "sid1", "orig1"], 1, "a@x", "m"))
+        self.assertIsNone(r.ingest(self.h, c, ["orig1"], 1, "a@x", "m"))
+        self.assertIsNone(r.ingest(self.h, c, ["", "sid1"], 1, "a@x", "m"))
+        # no id at all: stored every time (cannot be deduplicated)
+        self.assertIsNotNone(r.ingest(self.h, c, [], 2, "a@x", "n"))
+        self.assertIsNotNone(r.ingest(self.h, c, [None], 2, "a@x", "n"))
+
+    def test_route(self):
+        me = "me@x"
+        rooms = {"room@c.x": "me"}
+        self.assertEqual(r.route(me, rooms, "chat", "bob@x", "phone", "me@x"),
+                         ("bob@x", "chat", "bob@x"))
+        self.assertEqual(r.route(me, rooms, "normal", "bob@x", "", "me@x"),
+                         ("bob@x", "chat", "bob@x"))
+        # own message from another client (carbon sent / MAM outgoing)
+        self.assertEqual(r.route(me, rooms, "chat", "me@x", "gajim", "bob@x"),
+                         ("bob@x", "chat", ""))
+        self.assertIsNone(r.route(me, rooms, "chat", "me@x", "gajim", "me@x"))
+        self.assertEqual(r.route(me, rooms, "groupchat", "room@c.x", "alice", "me@x"),
+                         ("room@c.x", "room", "alice"))
+        self.assertEqual(r.route(me, rooms, "groupchat", "room@c.x", "me", "me@x"),
+                         ("room@c.x", "room", ""))
+        self.assertIsNone(r.route(me, rooms, "groupchat", "room@c.x", "", "me@x"))
+        self.assertIsNone(r.route(me, rooms, "groupchat", "other@c.x", "z", "me@x"))
+        self.assertIsNone(r.route(me, rooms, "chat", "room@c.x", "alice", "me@x"))
+        self.assertIsNone(r.route(me, rooms, "error", "bob@x", "", "me@x"))
+        self.assertIsNone(r.route(me, rooms, "headline", "bob@x", "", "me@x"))
+
+    def test_presence_of(self):
+        self.assertEqual(r.presence_of([]), "off")
+        self.assertEqual(r.presence_of(["away"]), "away")
+        self.assertEqual(r.presence_of(["xa", "dnd"]), "away")
+        self.assertEqual(r.presence_of(["away", ""]), "on")
+        self.assertEqual(r.presence_of(["chat"]), "on")
+
+    def test_deliver(self):
+        h = self.h
+        c = h.conv_for("bob@x", "chat", "Bob")
+        room = h.conv_for("room@c.x", "room", "Room")
+        out = []
+        emit = lambda jid, mtype, text, cmid: out.append((jid, mtype, text, cmid))
+        r.deliver(h, {"room@c.x": "me"}, c, "hi", "m1", emit)
+        r.deliver(h, {"room@c.x": "me"}, room, "yo", "m2", emit)
+        self.assertEqual(out, [("bob@x", "chat", "hi", "m1"),
+                               ("room@c.x", "groupchat", "yo", "m2")])
+        with self.assertRaises(r.SendError) as e:
+            r.deliver(h, {}, room, "yo", "m3", emit)
+        self.assertEqual(e.exception.reason, "not-joined")
+        with self.assertRaises(r.SendError) as e:
+            r.deliver(h, {}, 999, "yo", "m4", emit)
+        self.assertEqual(e.exception.reason, "unknown-conversation")
+
+        def bad(*a):
+            raise OSError("socket gone")
+        with self.assertRaises(r.SendError) as e, self.assertLogs("xmpp-relay", "ERROR"):
+            r.deliver(h, {}, c, "hi", "m5", bad)
+        self.assertEqual(e.exception.reason, "internal")
+
+
+class DevicePortTests(unittest.TestCase):
+    def test_port_maps_send_to_send_text(self):
+        class S:
+            online = True
+            def __init__(self):
+                self.got = []
+            def send_text(self, *a):
+                self.got.append(a)
+        s = S()
+        p = r.DevicePort(s)
+        self.assertTrue(p.online)
+        p.send(3, "hi", "c1")
+        self.assertEqual(s.got, [(3, "hi", "c1")])
+        s.online = False
+        self.assertFalse(p.online)
+
+
+class ConfigTests(unittest.TestCase):
+    def test_load_config(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "relay.ini")
+        with open(p, "w") as f:
+            f.write("[relay]\njid = a@b\npassword = SECRETPW1\npassphrase = SECRETPP1\n")
+        c = r.load_config(p)
+        self.assertEqual((c.jid, c.password, c.passphrase), ("a@b", "SECRETPW1", "SECRETPP1"))
+        self.assertEqual((c.host, c.port, c.history), ("0.0.0.0", 8765, 50))
+        self.assertEqual(c.db, os.path.join(d, "relay.db"))
+        self.assertNotIn("SECRET", repr(c))
+        with open(p, "w") as f:
+            f.write("[relay]\njid = a@b\npassword = SECRETPW1\npassphrase = SECRETPP1\n"
+                    "listen = 127.0.0.1:9000\nhistory = 20\ndb = /var/x.db\n")
+        c = r.load_config(p)
+        self.assertEqual((c.host, c.port, c.history, c.db), ("127.0.0.1", 9000, 20, "/var/x.db"))
+        with open(p, "w") as f:
+            f.write("[relay]\njid = a@b\npassword = SECRETPW1\n")
+        with self.assertRaises(ValueError):
+            r.load_config(p)
+
+    def test_example_config_parses(self):
+        c = r.load_config(os.path.join(HERE, "relay.ini.example"))
+        self.assertEqual((c.host, c.port, c.history), ("0.0.0.0", 8765, 50))
+        self.assertTrue(c.jid.endswith("@example.org"))
+        self.assertTrue(c.password.startswith("change-me"))
+
+    def test_no_slixmpp_at_import(self):
+        src = open(os.path.join(HERE, "xmpp_relay.py"), encoding="utf-8").read()
+        top = [l for l in src.splitlines() if l.startswith(("import slixmpp", "from slixmpp"))]
+        self.assertEqual(top, [])
+
+
 if __name__ == "__main__":
     unittest.main()

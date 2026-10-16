@@ -1,0 +1,15 @@
+# Copy to relay.ini (keep it private: chmod 600) and fill in.
+# Read once at start; restart the relay after editing.
+[relay]
+# The XMPP account the relay logs in as.
+jid = you@example.org
+password = change-me
+# Shared secret typed into the app's Setup screen. The only secret the device
+# holds (it keeps keys derived from it, never this text). Use a long random one.
+passphrase = change-me-to-a-long-random-phrase
+# Plain-HTTP address the device (or a reverse proxy) reaches. Default 0.0.0.0:8765.
+listen = 0.0.0.0:8765
+# Messages kept per conversation. Default 50.
+history = 50
+# SQLite file; a relative path is relative to this file's directory. Default relay.db.
+db = relay.db
