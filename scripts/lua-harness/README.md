@@ -65,3 +65,17 @@ cause. Two conventions worth knowing:
 - `APP ERROR:` means the app raised inside a guarded callback — the harness
   keeps going, and the scenario fails later on a symptom. The first `APP ERROR`
   line is the real one.
+
+## xmpp scenarios
+
+The xmpp app (`deploy/apps/xmpp`) needs a few host features beyond the
+compass-era mock. `wada.crypto` (`sha256`, `hmac_sha256`, `hex`) is backed by a
+small SHA-256/HMAC in `main.c`. `wada.net.http_post` records each request in
+`net_log` and answers on a *later* tick from the scenario's
+`cfg.relay(url, body) -> status, reply` (any 2xx becomes `200` + body, anything
+else `-1, nil`, as on the device); like the firmware it raises if a second post
+is made while one is in flight. `wada.ui.input` is answered on the next tick
+from the `cfg.inputs` queue (`false` or an empty queue means cancel).
+`wada.sys.random()` with no arguments returns successive values from an LCG
+reseeded by `reset_world()`, so nonces differ within a scenario but runs are
+reproducible; ranged calls are unchanged.

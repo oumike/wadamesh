@@ -2,10 +2,14 @@
 local debug, io, loadfile, print, error, assert, pcall, type, tostring, string, math, table, ipairs, pairs =
       debug, io, loadfile, print, error, assert, pcall, type, tostring, string, math, table, ipairs, pairs
 local APP_PATH, SCENARIO = APP_PATH, SCENARIO
+local host_sha256, host_hmac_sha256 = __host_sha256, __host_hmac_sha256
 
 local BUDGET, INIT_BUDGET = 100000, 500000
 local clock_ms = 1000
 local toasts, fails, maxinstr = {}, 0, 0
+local net_log = {}   -- http_post request log: { {url, body, ctype}, ... }
+local net_pending, input_pending   -- queued async results, delivered on the next tick
+local rng_state = 1
 local dm_sent = {}   -- send_dm call log: { {to, text}, ... }
 local function checkint(v, what) assert(math.tointeger(v) ~= nil, what .. ": not an integer: " .. tostring(v)) end
 local function checkcol(v, what) if v ~= nil then checkint(v, what .. " color") end end
@@ -284,7 +288,14 @@ local function build_wada()
   wada.sys.keep_awake = function(on) cfg.awake = (on == nil) or on end
   wada.sys.toast = function(msg, ms) checkstr(msg, "toast"); toasts[#toasts + 1] = tostring(msg) end
   wada.sys.board = function() return { w = cfg.w, h = cfg.h, touch = cfg.caps.touch } end
-  wada.sys.random = function(lo, hi) lo = lo or 0; hi = hi or 0; if hi <= lo then return 12345 end return lo end
+  -- No-arg random() is esp_random(): successive 32-bit values (seeded LCG so
+  -- scenarios are deterministic). Ranged calls keep the old constant mock.
+  wada.sys.random = function(lo, hi)
+    if lo == nil and hi == nil then
+      rng_state = (rng_state * 1664525 + 1013904223) & 0xFFFFFFFF
+      return (rng_state ~ (rng_state >> 15)) & 0xFFFFFFFF   -- wraps negative under LUA_32BITS
+    end
+    lo = lo or 0; hi = hi or 0; if hi <= lo then return 12345 end return lo end
   wada.sys.epoch = function() return nil end
   wada.sys.datetime = function() return nil end
   wada.sys.beep = function() return false end
@@ -306,6 +317,45 @@ local function build_wada()
   end
   if cfg.caps.accel then
     wada.sys.accel = function() return cfg.accel and cfg.accel() or { x = 0, y = 0, z = 1 } end
+  end
+
+  -- wada.crypto: binary strings in and out, as LuaAppHost.cpp's cryptoDigest
+  wada.crypto = {
+    sha256 = function(m) checkstr(m, "sha256"); return host_sha256(tostring(m)) end,
+    hmac_sha256 = function(k, m)
+      checkstr(k, "hmac_sha256 key"); checkstr(m, "hmac_sha256 msg")
+      return host_hmac_sha256(tostring(k), tostring(m)) end,
+    hex = function(s) checkstr(s, "hex"); return (tostring(s):gsub(".", function(ch) return string.format("%02x", ch:byte()) end)) end,
+  }
+
+  -- wada.net.http_post(url, body [, ctype], cb [, max_reply]): same checks and
+  -- single-in-flight rule as netHttpPost (which raises, not returns false). The
+  -- reply comes from cfg.relay(url, body) -> status, reply on a LATER tick;
+  -- device collapses any 2xx to 200 + body and everything else to -1, nil.
+  wada.net.http_post = function(url, body, a3, a4, a5)
+    checkstr(url, "http_post url"); checkstr(body, "http_post body")
+    local ctype, cb, maxr = "application/octet-stream", a3, a4
+    if type(a3) == "string" then ctype, cb, maxr = a3, a4, a5 else maxr = a4 end
+    assert(type(cb) == "function", "http_post: callback must be a function")
+    if maxr ~= nil then checkint(maxr, "http_post max_reply") end
+    assert(url:sub(1, 7) == "http://", "http:// urls only")
+    assert(#url < 256, "url too long")
+    assert(#body > 0 and #body <= 64 * 1024, "bad body length")
+    assert(not net_pending, "a fetch is already running")
+    net_log[#net_log + 1] = { url = url, body = body, ctype = ctype }
+    net_pending = { url = url, body = body, cb = cb }
+    return nil
+  end
+
+  -- wada.ui.input(title, initial, cb): exactly one cb(text | nil), answered from
+  -- cfg.inputs (a queue; false or an empty queue = cancel, since nil cannot sit
+  -- in a Lua array).
+  wada.ui.input = function(title, initial, cb)
+    if title ~= nil then checkstr(title, "input title") end
+    if initial ~= nil then checkstr(initial, "input initial") end
+    assert(type(cb) == "function", "input: callback must be a function")
+    assert(not input_pending, "an input prompt is already open")
+    input_pending = { title = title or "", initial = initial or "", cb = cb }
   end
 
   wada.mesh.contacts = function() return cfg.contacts or {} end
@@ -459,7 +509,23 @@ end
 
 local function send(app, ev) if app.on_input then guarded(BUDGET, app.on_input, ev) end end
 local function tick(app, n, dt)
-  for _ = 1, (n or 1) do clock_ms = clock_ms + (dt or 150); if app.on_tick then guarded(BUDGET, app.on_tick, dt or 150) end end
+  for _ = 1, (n or 1) do clock_ms = clock_ms + (dt or 150)
+    if net_pending then
+      local p = net_pending; net_pending = nil
+      local st, reply = -1, nil
+      if cfg.relay then
+        local s2, r2 = cfg.relay(p.url, p.body)
+        if type(s2) == "number" and s2 >= 200 and s2 < 300 then st, reply = 200, r2 end
+      end
+      guarded(BUDGET, p.cb, st, reply)
+    end
+    if input_pending then
+      local p = input_pending; input_pending = nil
+      local v = cfg.inputs and table.remove(cfg.inputs, 1)
+      if v == false then v = nil end
+      guarded(BUDGET, p.cb, v)
+    end
+    if app.on_tick then guarded(BUDGET, app.on_tick, dt or 150) end end
 end
 local function key(app, k, code) send(app, { type = "key", key = k, code = code or (k and k:byte()) or 0 }) end
 local function swipe(app, dir) send(app, { type = "swipe", dir = dir, x = 0, y = 0 }) end
@@ -479,6 +545,7 @@ local function reset_world()
   lists = {}
   clock_ms = 1000
   dm_sent = {}
+  net_log, net_pending, input_pending, rng_state = {}, nil, nil, 1
   audio_state = { state = "stopped", path = "", source = "", format = "", error = nil }
   dm_sent = {}
   audio_log = {}
@@ -2097,6 +2164,56 @@ scenarios.protreck_cost = function()
   if app.on_close then guarded(BUDGET, app.on_close) end
 end
 
+-- ---- xmpp app ---------------------------------------------------------------
+scenarios.harness_crypto = function()
+  cfg = { w = 320, h = 196, caps = { sdk_ext = true, keyboard = true, touch = false } }
+  wada = build_wada()
+  local c = wada.crypto
+  assert(c.hex(c.hmac_sha256("Jefe", "what do ya want for nothing?")) ==
+    "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "RFC 4231 case 2")
+  assert(c.hex(c.sha256("abc")) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256 abc")
+  assert(c.hex(c.sha256("")) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256 empty")
+  -- key longer than the block size is hashed first (RFC 4231 case 6)
+  assert(c.hex(c.hmac_sha256(("\xaa"):rep(131), "Test Using Larger Than Block-Size Key - Hash Key First")) ==
+    "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54", "RFC 4231 case 6")
+  assert(#c.sha256(("a"):rep(1000)) == 32)
+  assert(c.hex("\0\255\16") == "00ff10", "hex")
+  -- random(): seeded, successive, deterministic across reset_world
+  local a, b = wada.sys.random(), wada.sys.random()
+  assert(a ~= b and math.type(a) == "integer", "random() should vary")
+  reset_world()
+  wada = build_wada()
+  assert(wada.sys.random() == a and wada.sys.random() == b, "random() reseeded by reset_world")
+  assert(wada.sys.random(5, 5) == 12345, "ranged random unchanged")
+  -- http_post: async via tick, recorded, one in flight
+  cfg.relay = function(url, body) if body == "bad" then return 500, "x" end return 200, "echo:" .. body end
+  local got
+  wada.net.http_post("http://h/x", "hello", "text/plain", function(st, body) got = { st, body } end)
+  assert(got == nil, "reply must not be synchronous")
+  assert(not pcall(wada.net.http_post, "http://h/x", "again", function() end), "second post while pending")
+  local app = { on_tick = function() end }
+  tick(app, 1)
+  assert(got and got[1] == 200 and got[2] == "echo:hello", "reply delivered on tick")
+  assert(#net_log == 1 and net_log[1].url == "http://h/x" and net_log[1].body == "hello")
+  wada.net.http_post("http://h/x", "bad", function(st, body) got = { st, body } end)  -- ctype omitted
+  tick(app, 1)
+  assert(got[1] == -1 and got[2] == nil, "non-2xx collapses to -1, nil")
+  assert(not pcall(wada.net.http_post, "https://h/x", "b", function() end), "http:// only")
+  assert(not pcall(wada.net.http_post, "http://h/x", "", function() end), "empty body")
+  -- ui.input: answered from cfg.inputs, one prompt at a time, exactly one cb
+  cfg.inputs = { "typed", false }
+  local r = {}
+  wada.ui.input("T", "init", function(t) r[#r + 1] = t == nil and "nil" or t end)
+  assert(#r == 0, "input answers later")
+  assert(not pcall(wada.ui.input, "T", "", function() end), "second prompt while open")
+  tick(app, 1)
+  assert(r[1] == "typed")
+  wada.ui.input("T", "", function(t) r[#r + 1] = t == nil and "nil" or t end)
+  tick(app, 1)
+  assert(r[2] == "nil" and #r == 2, "false in queue means cancel")
+  print("  crypto, http_post, input and random mocks ok")
+end
+
 -- True (and says so) when this app has no scenarios of its own. Returning a
 -- truthy value makes the dispatch below pick an EMPTY list rather than running
 -- someone else's tests against it.
@@ -2118,6 +2235,8 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   and { "trip_v4", "trip_tdeck", "trip_moving", "trip_persist", "trip_reset", "trip_cost" }
   or APP_PATH:find("/protreck/", 1, true)
   and { "protreck_tdeck", "protreck_v4", "protreck_no_gps", "protreck_chrono", "protreck_timer", "protreck_alti", "protreck_cost" }
+  or APP_PATH:find("/xmpp/", 1, true)
+  and { "harness_crypto" }
   or APP_PATH:find("/ping/", 1, true)
   and { "ping_tdeck", "ping_v4", "ping_no_contacts", "ping_round_trip", "ping_auto_reply", "ping_cost" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no
