@@ -106,7 +106,8 @@ local function mkbutton(text, x, y, w, h, fn)
   checkstr(text, "button text"); checkint(x, "button x"); checkint(y, "button y")
   if w then checkint(w, "button w") end; if h then checkint(h, "button h") end
   widgets.buttons = widgets.buttons + 1
-  local b = mklabel(text, x, y, 14, nil); b.fn = fn; buttons[#buttons + 1] = b
+  local b = mklabel(text, x, y, 14, nil); b.fn = fn; b.is_button = true; b.bw, b.bh = w, h
+  buttons[#buttons + 1] = b
   return b
 end
 
@@ -117,16 +118,19 @@ local function mklist(x, y, w, h)
   assert(w > 0 and h > 0, "list: width and height must be positive")
   widgets.seq = (widgets.seq or 0) + 1
   local l = { rows = {}, x = x, y = y, w = w, h = h, seq = widgets.seq }
+  -- widgets.listops counts every row change, so a scenario can prove an idle
+  -- tick touched nothing
+  local function op() widgets.listops = (widgets.listops or 0) + 1 end
   function l:add(text, fn)
     checkstr(text, "list:add text"); assert(fn == nil or type(fn) == "function", "list:add fn")
-    l.rows[#l.rows + 1] = { text = tostring(text), fn = fn }; return #l.rows
+    op(); l.rows[#l.rows + 1] = { text = tostring(text), fn = fn }; return #l.rows
   end
-  function l:set(i, text) checkint(i, "list:set"); checkstr(text, "list:set"); if l.rows[i] then l.rows[i].text = tostring(text) end end
-  function l:color(i, c) checkint(i, "list:color"); checkcol(c, "list:color") end
-  function l:clear() l.rows = {} end
+  function l:set(i, text) checkint(i, "list:set"); checkstr(text, "list:set"); op(); if l.rows[i] then l.rows[i].text = tostring(text) end end
+  function l:color(i, c) checkint(i, "list:color"); checkcol(c, "list:color"); op(); if l.rows[i] then l.rows[i].color = c end end
+  function l:clear() op(); l.rows = {}; l.sel = nil end
   function l:count() return #l.rows end
-  function l:select(i) checkint(i, "list:select") end
-  function l:selected() return 0 end
+  function l:select(i) checkint(i, "list:select"); l.sel = l.rows[i] and i or nil end
+  function l:selected() return l.sel end
   function l:pos(px, py) checkint(px, "list:pos"); checkint(py, "list:pos") end
   lists[#lists + 1] = l
   return l
@@ -2470,7 +2474,7 @@ local function xm_relay(T, handler)
   cfg.relay = function(url, body)
     local pt = T.open(e, m, "Q", body)
     assert(pt, "request did not open with the scenario keys")
-    local req = { url = url, at = clock_ms, m = {}, r = {} }
+    local req = { url = url, at = clock_ms, m = {}, r = {}, raw = pt }
     for l in pt:gmatch("([^\n]*)\n") do
       local f = T.fields(l)
       if f[1] == "S" then req.sid, req.q, req.cursor = f[2], tonumber(f[3]), tonumber(f[4])
@@ -2533,11 +2537,11 @@ scenarios.xmpp_setup = function()
     local s = T.state()
     if s == "deriving" then kdf_ticks = kdf_ticks + 1 end
     if seen[#seen] ~= s then seen[#seen + 1] = s end
-    return s == "online"
-  end, 60, "online after the KDF")
+    return s == "connecting"
+  end, 60, "connecting after the KDF")
   print(string.format("  states %s; KDF in %d ticks, worst tick ~%d instructions (budget %d)",
     table.concat(seen, " > "), kdf_ticks, XM.tick, BUDGET))
-  assert(table.concat(seen, ",") == "setup,deriving,online", "state sequence " .. table.concat(seen, ","))
+  assert(table.concat(seen, ",") == "setup,deriving,connecting", "state sequence " .. table.concat(seen, ","))
   assert(storekv.url == XM_URL, "url stored without the trailing slash: " .. tostring(storekv.url))
   assert(storekv.ek == hex(e) and storekv.mk == hex(m), "derived keys stored as hex")
   assert(type(storekv.sid) == "string" and #storekv.sid == 16 and storekv.sid:match("^[0-9a-f]+$"), "sid: " .. tostring(storekv.sid))
@@ -2545,11 +2549,13 @@ scenarios.xmpp_setup = function()
   for k, v in pairs(storekv) do
     assert(not tostring(v):find("pw", 1, true), "passphrase leaked into store key " .. k)
   end
-  assert(T.header() == "Online", "header " .. tostring(T.header()))
+  assert(T.header() == "Connecting…", "header before the first reply " .. tostring(T.header()))
   xm_until(app, function() return #log >= 1 end, 4, "first request")
   assert(log[1].url == XM_URL .. "/w" and log[1].sid == storekv.sid and log[1].cursor == 0 and log[1].q == 0,
     "first request " .. log[1].url .. " q=" .. log[1].q)
   assert(posts[1].ct == "application/octet-stream" and posts[1].mr == 8192, "content type / max_reply")
+  xm_until(app, function() return net_pending == nil end, 4)
+  assert(T.state() == "online" and T.header() == "Online", "first reply: " .. tostring(T.header()))
   -- reopen: no prompt, same sid, q from the next reserved block
   xm_until(app, function() return net_pending == nil end, 4)
   if app.on_close then guarded(BUDGET, app.on_close) end
@@ -2557,7 +2563,7 @@ scenarios.xmpp_setup = function()
   local app2 = load_app()
   cfg.inputs = {}
   xm_open(app2)
-  assert(app2._t.state() == "online", "configured app opens online")
+  assert(app2._t.state() == "connecting", "configured app opens connecting")
   xm_until(app2, function() return #log >= 2 end, 4, "request after reopen")
   assert(log[2].sid == sid and log[2].q == 1000 and storekv.qb == "2000", "reopen q " .. log[2].q)
   -- Reset forgets keys and makes a new sid at the next setup
@@ -2594,7 +2600,7 @@ scenarios.xmpp_sync = function()
     return L("P", req.q) .. L("N", 41, 0)
   end)
   xm_open(app)
-  assert(T.state() == "online", "configured app opens online")
+  assert(T.state() == "connecting" and T.header() == "Connecting…", "configured app opens connecting")
   xm_until(app, function() return #log >= 1 end, 4, "first request")
   assert(log[1].cursor == 0 and log[1].q == 0 and log[1].sid == XM_SID, "first request S line")
   xm_until(app, function() return #log >= 2 end, 40, "second request")
@@ -2744,9 +2750,10 @@ scenarios.xmpp_post_raises = function()
   wada.net.http_post = function() calls[#calls + 1] = clock_ms; error(err) end
   xm_open(app)
   xm_until(app, function() return #calls >= 8 end, 8 * 25, "busy posts")
-  assert(T.state() == "online" and T.header() == "Online", "busy must not count as a failure: " .. tostring(T.header()))
+  -- no reply ever arrives, so the header stays "Connecting…" (R7), never "unreachable"
+  assert(T.state() == "connecting" and T.header() == "Connecting…", "busy must not count as a failure: " .. tostring(T.header()))
   assert(calls[8] - calls[7] <= 5500, "no backoff while busy")
-  print("  raising http_post: backoff + unreachable; busy: retried, still online")
+  print("  raising http_post: backoff + unreachable; busy: retried, still connecting")
 end
 
 scenarios.xmpp_relay_reset = function()
@@ -2904,6 +2911,421 @@ scenarios.xmpp_bounds = function()
   assert(XM.cb < BUDGET)
 end
 
+-- ---- xmpp: screens (Task 7) -------------------------------------------------
+local XM_EMPTY = "No contacts or rooms yet. Add contacts or bookmark rooms from another XMPP client."
+
+local function xm_ui_world(w, h, caps)
+  xm_world()
+  cfg.w, cfg.h = w, h
+  for k, v in pairs(caps or {}) do cfg.caps[k] = v end
+  wada = build_wada()
+end
+
+-- the one list on the current screen (nil when there is none)
+local function xm_list()
+  assert(#lists <= 1, "one list per screen, found " .. #lists)
+  return lists[1]
+end
+local function xm_rows()
+  local l, t = xm_list(), {}
+  if l then for i, r in ipairs(l.rows) do t[i] = r.text end end
+  return t
+end
+local function xm_row_is(i, text)
+  local r = xm_rows()
+  assert(r[i] == text, string.format("row %d: expected %q, got %q (rows: %s)", i, text, tostring(r[i]),
+    table.concat(r, " / ")))
+end
+-- what enter on a focused row (or a tap) does: run that row's callback
+local function xm_pick(i)
+  local l = assert(xm_list(), "no list on screen: " .. label_dump())
+  local r = assert(l.rows[i], "no row " .. i)
+  assert(r.fn, "row " .. i .. " (" .. r.text .. ") does nothing")
+  local c = xm_metered(r.fn)
+  if c > XM.cb then XM.cb = c end
+end
+local function xm_pick_text(text)
+  for i, t in ipairs(xm_rows()) do if t == text or t:sub(1, #text) == text then return xm_pick(i) end end
+  error("no row starting with '" .. text .. "': " .. table.concat(xm_rows(), " / "))
+end
+local function xm_label(text)
+  for _, l in ipairs(labels) do if not l.is_button and l.text == text then return l end end
+  return nil
+end
+local function xm_screen_text()
+  return label_dump() .. " || " .. table.concat(xm_rows(), " / ")
+end
+
+-- Every widget inside the screen, none overlapping another; on keyboard boards
+-- buttons come first in focus order and sit above the list.
+local function xm_assert_layout(where)
+  local W, H = cfg.w, cfg.h
+  local boxes = {}
+  for _, l in ipairs(labels) do
+    if l.text ~= "" then
+      local bw, bh
+      if l.is_button then
+        bw, bh = l.bw, l.bh
+      else
+        local size = l.size or 12
+        bw = l.w or wada.ui.text_w(l.text, size)
+        local lines = l.w and wada.ui.text_lines(l.text, l.w, size) or select(2, l.text:gsub("\n", "")) + 1
+        bh = lines * wada.ui.text_h(size)
+        if not l.w then assert(bw <= W - l.x, where .. ": unwrapped label runs off the screen: " .. l.text) end
+      end
+      boxes[#boxes + 1] = { what = (l.is_button and "button '" or "label '") .. l.text:sub(1, 30) .. "'",
+                            x = l.x, y = l.y, w = bw, h = bh }
+    end
+  end
+  for _, l in ipairs(lists) do boxes[#boxes + 1] = { what = "list", x = l.x, y = l.y, w = l.w, h = l.h } end
+  for i, b in ipairs(boxes) do
+    assert(b.x >= 0 and b.y >= 0 and b.x + b.w <= W and b.y + b.h <= H,
+      string.format("%s: %s outside %dx%d at %d,%d %dx%d", where, b.what, W, H, b.x, b.y, b.w, b.h))
+    for j = i + 1, #boxes do
+      local o = boxes[j]
+      local apart = b.x + b.w <= o.x or o.x + o.w <= b.x or b.y + b.h <= o.y or o.y + o.h <= b.y
+      assert(apart, string.format("%s: %s overlaps %s", where, b.what, o.what))
+    end
+  end
+  local stops = #buttons
+  for _, l in ipairs(lists) do
+    stops = stops + #l.rows
+    for _, b in ipairs(buttons) do
+      assert(b.seq < l.seq, where .. ": the '" .. b.text .. "' button comes after the list in focus order")
+      assert(b.y + b.bh <= l.y, where .. ": the '" .. b.text .. "' button is not above the list")
+    end
+  end
+  assert(stops < 160, where .. ": " .. stops .. " focus stops")
+end
+
+-- canned account: Alice has 2 unread, Bob is away, a room, and Dave offline with no messages
+local function xm_account(req)
+  return L("P", req.q)
+    .. L("C", 1, "chat", "alice@x.test", "Alice", "on", 2)
+    .. L("C", 2, "chat", "bob@x.test", "Bob", "away", 0)
+    .. L("C", 3, "room", "lounge@conf.x.test", "Lounge", "on", 0)
+    .. L("C", 4, "chat", "dave@x.test", "Dave", "off", 0)
+    .. L("G", 1, 10, 1700000000, "alice@x.test", "hello")
+    .. L("G", 3, 11, 1700000001, "carol", "hey all")
+    .. L("G", 3, 12, 1700000002, "", "me too")
+    .. L("G", 2, 13, 1700000003, "bob@x.test", "yo")
+    .. L("G", 2, 14, 1700000004, "bob@x.test", "you there?")
+    .. L("N", 14, 0)
+end
+
+scenarios.xmpp_chat = function()
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local mode, seq = "noack", 14
+  local log = xm_relay(T, function(req, n)
+    if n == 1 then return xm_account(req) end
+    local out = L("P", req.q)
+    for _, mm in ipairs(req.m) do
+      if mode == "ack" then
+        seq = seq + 1
+        out = out .. L("A", mm.cmid, "ok") .. L("G", mm.conv, seq, 1700000100, "", T.esc(mm.text))
+      elseif mode == "err" then
+        out = out .. L("A", mm.cmid, "err", "recipient unavailable")
+      end
+    end
+    return out .. L("N", seq, 0)
+  end)
+  xm_open(app)
+  -- R7: "Connecting…" from session start until the first reply
+  assert(T.state() == "connecting" and xm_label("Connecting…"), "header before the first reply: " .. xm_screen_text())
+  assert(#xm_rows() == 0 and not xm_label(XM_EMPTY), "nothing listed before the first reply")
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4, "first reply")
+  xm_tick(app)
+  assert(xm_label("Online"), "header after the first reply: " .. xm_screen_text())
+  assert(has_button("Settings"), "list screen has Settings")
+  local rows = xm_rows()
+  assert(#rows == 4, "four conversations: " .. table.concat(rows, " / "))
+  xm_row_is(1, "● Alice  (2)")      -- unread first
+  xm_row_is(2, "◐ Bob")             -- then latest message seq (14)
+  xm_row_is(3, "# Lounge")          -- (12)
+  xm_row_is(4, "○ Dave")            -- (no messages)
+  xm_assert_layout("list")
+  -- open Alice: header = name, plain rows, R for the newest seq on the next request
+  xm_pick(1)
+  assert(xm_label("Alice") and has_button("Write") and has_button("Back"), "chat screen: " .. xm_screen_text())
+  assert(table.concat(xm_rows(), "|") == "hello", "chat rows: " .. table.concat(xm_rows(), " / "))
+  xm_assert_layout("chat")
+  local n = #log
+  xm_until(app, function() return #log > n end, 25, "request after opening")
+  assert(#log[#log].r == 1 and log[#log].r[1].conv == 1 and log[#log].r[1].seq == 10, "R 1 10 sent")
+  assert(log[#log].raw:find("\nR\t1\t10\n", 1, true), "R line in the request")
+  press("Back")
+  xm_tick(app)
+  xm_row_is(1, "◐ Bob")
+  xm_row_is(3, "● Alice")         -- read: no count, back in activity order
+  -- a room: sender prefix, own messages "> " in the accent colour
+  xm_pick_text("# Lounge")
+  assert(xm_label("Lounge"), "room header")
+  xm_row_is(1, "carol: hey all")
+  xm_row_is(2, "> me too")
+  local l = xm_list()
+  assert(l.rows[2].color == wada.ui.colors.accent, "own message in the accent colour")
+  assert(l.rows[1].color ~= wada.ui.colors.accent, "others not in the accent colour")
+  press("Back")
+  -- Write in a chat: pending " …" until A ok, then the relay's copy only
+  xm_pick_text("◐ Bob")
+  xm_row_is(1, "yo")
+  xm_row_is(2, "you there?")
+  cfg.inputs = { false }
+  press("Write")
+  assert(input_pending and input_pending.title == "Message" and input_pending.initial == "", "Write prompt")
+  xm_tick(app)
+  assert(#xm_rows() == 2 and #T.pending(2) == 0, "cancelled Write sends nothing")
+  cfg.inputs = { "hi\tthere" }
+  press("Write")
+  n = #log
+  xm_tick(app)
+  xm_row_is(3, "> hi\tthere …")
+  assert(xm_list().rows[3].color == wada.ui.colors.accent, "pending own row in the accent colour")
+  xm_until(app, function() return #log > n and net_pending == nil end, 4, "request carrying M")
+  xm_tick(app)
+  local cmid = T.pending(2)[1].cmid
+  assert(log[#log].raw:find("\nM\t2\t" .. cmid .. "\thi\\tthere\n", 1, true), "escaped M line: " .. log[#log].raw)
+  xm_row_is(3, "> hi\tthere …")   -- no ack yet
+  mode = "ack"
+  n = #log
+  xm_until(app, function() return #log > n and net_pending == nil end, 25, "acked request")
+  xm_tick(app)
+  assert(#xm_rows() == 3, "one copy after the ack: " .. table.concat(xm_rows(), " / "))
+  xm_row_is(3, "> hi\tthere")
+  assert(xm_list().rows[3].color == wada.ui.colors.accent, "confirmed own row in the accent colour")
+  -- a refused send keeps its reason
+  mode = "err"
+  cfg.inputs = { "nope" }
+  press("Write")
+  n = #log
+  xm_until(app, function() return #log > n and net_pending == nil end, 25, "err ack")
+  xm_tick(app)
+  xm_row_is(4, "> nope ! recipient unavailable")
+  xm_assert_layout("chat after sends")
+  print(string.format("  list order, chat rows, Write, ack and err ok; worst tick ~%d, worst callback ~%d", XM.tick, XM.cb))
+end
+
+scenarios.xmpp_empty = function()
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local full = false
+  local log = xm_relay(T, function(req)
+    if full then return xm_account(req) end
+    return L("P", req.q) .. L("N", 0, 0)
+  end)
+  xm_open(app)
+  assert(not xm_label(XM_EMPTY), "no empty-state text before the relay answered")
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4)
+  xm_tick(app)
+  local lb = xm_label(XM_EMPTY)
+  assert(lb, "empty-state label: " .. xm_screen_text())
+  assert(lb.w and lb.w <= cfg.w, "empty-state text wraps inside the screen")
+  assert(has_button("Settings"), "Settings reachable from the empty list")
+  xm_assert_layout("empty")
+  full = true
+  local n = #log
+  xm_until(app, function() return #log > n and net_pending == nil end, 25)
+  xm_tick(app)
+  assert(not xm_label(XM_EMPTY) and #xm_rows() == 4, "conversations replace the empty state: " .. xm_screen_text())
+  print("  empty state shown, then replaced")
+end
+
+-- Heltec V4: 240x276 portrait, touch, no extended SDK (so no SD option)
+scenarios.xmpp_v4 = function()
+  xm_ui_world(240, 276, { touch = true, keyboard = false, sdk_ext = false })
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local denied = false
+  local long = ("a really long message that goes on "):rep(8)
+  local log = xm_relay(T, function(req, n)
+    if denied then return { raw = "DENIED" } end
+    if n == 1 then
+      return L("P", req.q) .. L("C", 1, "room", "r@c.x.test", "A room with an unusually long name for this screen", "on", 120)
+        .. L("C", 2, "chat", "b@x.test", "B", "on", 0)
+        .. L("G", 1, 5, 1700000000, "somebody-with-a-long-nick", long) .. L("N", 5, 0)
+    end
+    return L("P", req.q) .. L("N", 5, 0)
+  end)
+  xm_open(app)
+  xm_assert_layout("v4 connecting")
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4)
+  xm_tick(app)
+  xm_row_is(1, "# A room with an unusually long name for this screen  (120)")
+  xm_assert_layout("v4 list")
+  xm_pick(1)
+  xm_row_is(1, "somebody-with-a-long-nick: " .. long)   -- the list row wraps on device
+  xm_assert_layout("v4 chat")
+  press("Back")
+  press("Settings")
+  local rows = table.concat(xm_rows(), "|")
+  assert(rows == "Relay URL|Passphrase|Reset", "V4 settings rows: " .. rows)
+  assert(not xm_label("Stored unencrypted on the card."), "no SD description without sdk_ext")
+  xm_assert_layout("v4 settings")
+  press("Back")
+  -- the longest header still fits beside the Settings button
+  denied = true
+  local n = #log
+  xm_until(app, function() return #log > n and net_pending == nil end, 25)
+  xm_tick(app)
+  assert(xm_label("Passphrase rejected — check Settings"), "denied header: " .. xm_screen_text())
+  xm_assert_layout("v4 denied")
+  print("  V4 list, chat, settings and long header fit; no SD option")
+end
+
+-- ThinkNode M9: 320x196, keyboard/trackball, no touch
+scenarios.xmpp_m9 = function()
+  xm_ui_world(320, 196, { touch = false, keyboard = true, sdk_ext = true })
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local log = xm_relay(T, function(req)
+    if req.cursor == 0 then return xm_account(req) end   -- every new session starts from 0
+    return L("P", req.q) .. L("N", 14, 0)
+  end)
+  xm_open(app)
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4)
+  xm_tick(app)
+  assert(#xm_rows() == 4, "list built: " .. xm_screen_text())
+  xm_assert_layout("m9 list")
+  -- enter on a focused row opens it; backspace goes back
+  xm_pick(2)
+  assert(xm_label("Bob") and #xm_rows() == 2, "chat built: " .. xm_screen_text())
+  xm_assert_layout("m9 chat")
+  key(app, "backspace", 8)
+  assert(has_button("Settings") and #xm_rows() == 4, "backspace returns to the list: " .. xm_screen_text())
+  press("Settings")
+  xm_assert_layout("m9 settings")
+  xm_row_is(1, "Relay URL")
+  xm_row_is(2, "Passphrase")
+  xm_row_is(3, "Keep history on SD card: Off")
+  xm_row_is(4, "Reset")
+  assert(xm_label("Stored unencrypted on the card."), "SD description: " .. xm_screen_text())
+  xm_pick(3)
+  assert(storekv.sd == "1", "SD on stores sd=1")
+  xm_row_is(3, "Keep history on SD card: On")
+  xm_pick(3)
+  assert(storekv.sd == "0", "SD off stores sd=0")
+  xm_row_is(3, "Keep history on SD card: Off")
+  -- Relay URL prompts with the stored URL; cancel changes nothing
+  cfg.inputs = { false }
+  xm_pick(1)
+  assert(input_pending and input_pending.title == "Relay URL" and input_pending.initial == XM_URL, "Relay URL prompt")
+  xm_tick(app)
+  -- Passphrase asks for the passphrase only, keeps the URL; the screen goes back
+  -- to the list while the keys derive
+  cfg.inputs = { "pw" }
+  xm_pick(2)
+  assert(input_pending and input_pending.title == "Passphrase", "Passphrase row prompts the passphrase only")
+  xm_tick(app)
+  assert(T.state() == "deriving" and xm_label("Deriving keys…") and has_button("Settings"),
+    "deriving shown on the list: " .. xm_screen_text())
+  xm_assert_layout("m9 deriving")
+  xm_until(app, function() return #xm_rows() == 4 end, 60, "list back after the new keys")
+  assert(storekv.url == XM_URL, "URL kept")
+  press("Settings")
+  -- Reset needs a second press
+  xm_pick(4)
+  assert(storekv.ek ~= "" and T.state() ~= "setup", "one press must not reset")
+  assert(xm_rows()[4] ~= "Reset", "Reset row asks for confirmation")
+  xm_assert_layout("m9 reset confirm")
+  xm_pick(4)
+  assert(T.state() == "setup" and storekv.ek == "", "second press resets")
+  assert(xm_label("Not set up") and has_button("Set up relay"), "back on the list, not set up: " .. xm_screen_text())
+  xm_assert_layout("m9 not set up")
+  -- the confirmation lapses
+  xm_world(); cfg.w, cfg.h = 320, 196
+  wada = build_wada()
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  xm_relay(T, function(req) return L("P", req.q) .. L("N", 0, 0) end)
+  xm_open(app)
+  press("Settings")
+  xm_pick_text("Reset")
+  xm_tick(app, 6000 // 250)
+  xm_row_is(#xm_rows(), "Reset")
+  xm_pick(#xm_rows())
+  assert(T.state() ~= "setup", "a lapsed confirmation must not reset on the next press")
+  -- no card interface: no SD option
+  xm_world(); cfg.w, cfg.h = 320, 196
+  wada = build_wada()
+  local caps = wada.sys.caps
+  wada.sys.caps = function() local c = caps(); c.sd = false; return c end
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  xm_open(app)
+  press("Settings")
+  assert(table.concat(xm_rows(), "|") == "Relay URL|Passphrase|Reset", "no SD row without caps.sd")
+  print("  M9 list, chat, settings, SD toggle and Reset confirmation ok")
+end
+
+-- 40 conversations x 50 messages: steady ticks stay cheap and idle ticks touch nothing
+scenarios.xmpp_cost = function()
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local lines = {}
+  for c = 1, 40 do lines[#lines + 1] = L("C", c, c % 5 == 0 and "room" or "chat", "u" .. c .. "@x.test", "User " .. c, "on", c % 7) end
+  local s = 0
+  for k = 1, 50 do
+    for c = 1, 40 do
+      s = s + 1
+      lines[#lines + 1] = L("G", c, s, 1700000000 + s, "u" .. c .. "@x.test", "message number " .. k .. " in conversation " .. c)
+    end
+  end
+  local pos, extra = 1, nil
+  local log = xm_relay(T, function(req)
+    local out = { L("P", req.q) }
+    local bytes = 0
+    while pos <= #lines and bytes + #lines[pos] < 5900 do
+      out[#out + 1] = lines[pos]; bytes = bytes + #lines[pos]; pos = pos + 1
+    end
+    if extra then out[#out + 1] = extra; extra = nil end
+    out[#out + 1] = L("N", s, pos <= #lines and 1 or 0)
+    return table.concat(out)
+  end)
+  xm_open(app)
+  xm_until(app, function() return pos > #lines and net_pending == nil end, 200, "loading 2000 messages")
+  xm_tick(app)
+  assert(#xm_rows() == 40, "40 conversations listed")
+  assert(#T.msgs(1) == 50 and #T.msgs(40) == 50, "50 messages each")
+  local load_tick = XM.tick
+  XM.tick = 0
+  local ops, clears = widgets.listops or 0, widgets.cleared or 0
+  xm_tick(app, 20)
+  assert(#log >= 2, "a sync happened during the idle ticks")
+  assert((widgets.listops or 0) == ops and (widgets.cleared or 0) == clears,
+    "idle ticks must not touch the list: " .. ((widgets.listops or 0) - ops) .. " row ops")
+  local list_idle = XM.tick
+  -- a full chat: open it, then a new message arrives and the oldest drops
+  XM.cb = 0
+  xm_pick(1)
+  local open_cost = XM.cb
+  assert(#xm_rows() == 50, "50 rows in the chat")
+  XM.tick = 0
+  s = s + 1
+  local top = xm_rows()[1]
+  local open_id
+  for _, c in ipairs(T.convs()) do if xm_label(c.name) then open_id = c.id end end
+  assert(open_id, "open conversation")
+  extra = L("G", open_id, s, 1700009999, "u" .. open_id .. "@x.test", "the newest one")
+  xm_tick(app, 24)                 -- one 5 s poll interval plus a tick
+  local last = xm_rows()[50] or ""
+  assert(#xm_rows() == 50 and last:sub(-#"the newest one") == "the newest one", "newest row: " .. last)
+  assert(xm_rows()[1] ~= top, "oldest row dropped")
+  local chat_ticks = XM.tick
+  print(string.format("  loading ticks worst ~%d; idle list ticks worst ~%d; open chat ~%d; chat ticks worst ~%d",
+    load_tick, list_idle, open_cost, chat_ticks))
+  assert(load_tick < 25000 and list_idle < 25000 and chat_ticks < 25000, "tick over 25,000")
+  assert(open_cost < BUDGET, "opening a chat over budget")
+end
+
 -- True (and says so) when this app has no scenarios of its own. Returning a
 -- truthy value makes the dispatch below pick an EMPTY list rather than running
 -- someone else's tests against it.
@@ -2927,7 +3349,8 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   and { "protreck_tdeck", "protreck_v4", "protreck_no_gps", "protreck_chrono", "protreck_timer", "protreck_alti", "protreck_cost" }
   or APP_PATH:find("/xmpp/", 1, true)
   and { "harness_crypto", "xmpp_seal_vectors", "xmpp_kdf_budget", "xmpp_setup", "xmpp_sync", "xmpp_failures",
-        "xmpp_post_raises", "xmpp_relay_reset", "xmpp_outbox", "xmpp_bounds" }
+        "xmpp_post_raises", "xmpp_relay_reset", "xmpp_outbox", "xmpp_bounds",
+        "xmpp_chat", "xmpp_empty", "xmpp_v4", "xmpp_m9", "xmpp_cost" }
   or APP_PATH:find("/ping/", 1, true)
   and { "ping_tdeck", "ping_v4", "ping_no_contacts", "ping_round_trip", "ping_auto_reply", "ping_cost" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no

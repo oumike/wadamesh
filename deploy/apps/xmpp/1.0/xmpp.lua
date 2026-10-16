@@ -1,6 +1,6 @@
 -- XMPP chat through a wadamesh relay (scripts/xmpp-relay).
 -- Protocol: docs/superpowers/specs/2026-10-16-xmpp-app-design.md, section 2.
--- Sections: seal, codec, sync (setup, poll loop, outbox), app callbacks.
+-- Sections: seal, codec, sync (setup, poll loop, outbox), screens, app callbacks.
 -- Nothing here runs at load time beyond defining functions.
 
 local app = {}
@@ -215,13 +215,14 @@ local CTYPE = "application/octet-stream"
 local URL_MAX = 157                     -- url .. "/w" must fit the host's 160-byte s_net_url
 
 local HEADERS = {
+  connecting = "Connecting…",        -- session start until the first reply, whatever it says
   online = "Online",
   unreachable = "Relay unreachable",
   xmpp_offline = "Relay offline from XMPP",
   denied = "Passphrase rejected — check Settings",
 }
 local CORRUPTED = "Relay reply corrupted"
-local POLLING = { online = true, unreachable = true, xmpp_offline = true }
+local POLLING = { connecting = true, online = true, unreachable = true, xmpp_offline = true }
 
 local S = {
   state = "setup",
@@ -233,6 +234,7 @@ local S = {
   failed = {},      -- conv -> { {cmid, text, err = true, reason}, ... }
   rev = 0,          -- bumped whenever anything a screen shows changes
   fails = 0, bad = 0, cursor = 0, next_at = 0,
+  synced = false,   -- a reply was applied this session (the empty list is then really empty)
 }
 
 local function changed() S.rev = S.rev + 1 end
@@ -303,8 +305,9 @@ local function start_session(url, ek, mk, sid)
   reserve_q()
   S.fails, S.bad, S.next_at = 0, 0, 0
   S.reads = {}
+  S.synced = false
   clear_view()
-  S.state = "online"
+  S.state = "connecting"
   changed()
 end
 
@@ -329,11 +332,25 @@ local function finish_setup(url, st)
   start_session(url, st.enc, st.mac, sid)
 end
 
--- Prompts "Relay URL" then "Passphrase". Cancel at either step changes nothing.
-local function setup()
+local function ask_passphrase(u)
+  wada.ui.input("Passphrase", "", function(pw)
+    S.prompting = false
+    if not pw or pw == "" then return end
+    S.gen = S.gen + 1          -- stop the old session; its in-flight reply is ignored
+    S.kdf, S.kdf_url = kdf_new(pw), u
+    S.state = "deriving"
+    changed()
+  end)
+end
+
+-- Prompts "Relay URL" then "Passphrase" (only the passphrase when pass_only and
+-- a URL is stored). Cancel at either step changes nothing.
+local function setup(pass_only)
   if S.prompting then return end
   S.prompting = true
-  wada.ui.input("Relay URL", sget("url") or "http://", function(u)
+  local stored = sget("url")
+  if pass_only == true and stored then return ask_passphrase(stored) end
+  wada.ui.input("Relay URL", stored or "http://", function(u)
     if not u then S.prompting = false; return end
     u = u:match("^%s*(.-)%s*$")
     if ssub(u, -1) == "/" then u = ssub(u, 1, -2) end
@@ -342,14 +359,7 @@ local function setup()
       wada.sys.toast(#u > URL_MAX and "Relay URL too long" or "Relay URL must look like http://host:port")
       return
     end
-    wada.ui.input("Passphrase", "", function(pw)
-      S.prompting = false
-      if not pw or pw == "" then return end
-      S.gen = S.gen + 1          -- stop the old session; its in-flight reply is ignored
-      S.kdf, S.kdf_url = kdf_new(pw), u
-      S.state = "deriving"
-      changed()
-    end)
+    ask_passphrase(u)
   end)
 end
 
@@ -359,6 +369,7 @@ local function reset()
   S.gen = S.gen + 1
   S.kdf, S.url, S.ek, S.mk, S.sid = nil, nil, nil, nil, nil
   S.outbox, S.failed, S.reads = {}, {}, {}
+  S.synced = false
   clear_view()
   S.state = "setup"
   changed()
@@ -450,6 +461,7 @@ local function on_reply(req, status, body)
   local r = plain and parse_reply(plain)
   if not r or r.q ~= req.q then return failed(t, true) end
   S.fails, S.bad = 0, 0
+  S.synced = true
   S.state = r.offline and "xmpp_offline" or "online"
   apply_acks(r.acks)
   for _, rd in ipairs(req.reads) do
@@ -532,7 +544,7 @@ local function by_activity(a, b)
   return a.id < b.id
 end
 
--- conversation tables {id, kind, jid, name, presence, unread}: unread first, then latest
+-- conversation tables {id, kind, jid, name, presence, unread, seq, act, msgs}: unread first, then latest
 local function convs()
   local list = {}
   for _, c in pairs(S.convs) do list[#list + 1] = c end
@@ -571,34 +583,328 @@ local function header()
   return HEADERS[st]
 end
 
--- ---------------------------------------------------------------- app
--- Minimal screen: a status line and, until set up, a setup button. The list,
--- chat and settings screens are built on the app._t data API below.
-local ui = {}
+-- ---------------------------------------------------------------- screens
+-- list (conversations), chat (one conversation), settings. A screen is built
+-- once with wada.ui.clear(); after that on_tick only patches the rows whose
+-- text or colour changed, and only when S.rev moved. An idle tick touches no
+-- widget, and the list keeps its scroll position and keyboard focus.
+-- Keyboard / trackball boards: list rows and buttons are focus stops in creation
+-- order, so every screen creates its buttons first, above its list.
+-- Long rows: a list row's label has a fixed width and content height, so the
+-- firmware wraps long text inside the row; no wrapping is done here.
+
+local ui = { rows = {}, cols = {}, ids = {} }
+local DOTS = { on = "●", away = "◐" }          -- anything else is "○"; rooms are "#"
+local EMPTY = "No contacts or rooms yet. Add contacts or bookmark rooms from another XMPP client."
+local SD_ROW, SD_DESC = "Keep history on SD card", "Stored unencrypted on the card."
+local RESET_ROW, RESET_CONFIRM = "Reset", "Reset: press again to forget the relay keys"
+local CONFIRM_MS = 5000                         -- a second Reset press must come within this
+local TITLE_LINES = 2                           -- a top-bar text longer than this is cut
+
+local show_list, show_chat, show_settings      -- forward declarations
 
 local function status_text()
   return header() or (S.state == "deriving" and "Deriving keys…" or "Not set up")
 end
 
+local function status_color()
+  local C, st = wada.ui.colors, S.state
+  if st == "online" and S.bad < CORRUPT_AFTER then return C.good or C.text end
+  if st == "setup" or st == "deriving" or st == "connecting" then return C.sub end
+  return C.bad or C.text
+end
+
+-- sizes from the screen and the fonts, set in on_open
+local function metrics(w, h)
+  local U = wada.ui
+  ui.W, ui.H = w, h
+  ui.M = math.max(4, w // 64)
+  ui.th12, ui.th14 = U.text_h(12), U.text_h(14)
+  ui.BH = ui.th14 * 7 // 4
+  ui.ROWH = ui.th12 * 7 // 4 + 2                -- a one-line list row (label + padding + gap)
+end
+
+local function btn_w(text) return wada.ui.text_w(text, 14) + ui.th14 end
+
+local function fit_lines(text, w, size)
+  local n = wada.ui.text_lines(text, w, size)
+  return n > TITLE_LINES and TITLE_LINES or n
+end
+
+-- cut text (with "…") until it wraps to at most TITLE_LINES lines in w
+local function fit_text(text, w, size)
+  local lines = wada.ui.text_lines
+  if lines(text, w, size) <= TITLE_LINES then return text end
+  local n = #text
+  repeat
+    n = n - 1
+    local t = cut_utf8(text, n) .. "…"
+    if lines(t, w, size) <= TITLE_LINES then return t end
+  until n <= 1
+  return "…"
+end
+
+-- Top bar: optional buttons at the left and right edges, wrapped text between.
+-- left / right are { text, fn }. Returns the label, its width and line count,
+-- and the y where the content below starts.
+local function top_bar(left, text, size, color, right)
+  local U, M, BH = wada.ui, ui.M, ui.BH
+  local x0, x1 = M, ui.W - M
+  if left then
+    local bw = btn_w(left[1])
+    U.button(left[1], x0, M, bw, BH, left[2])
+    x0 = x0 + bw + M
+  end
+  if right then
+    local bw = btn_w(right[1])
+    U.button(right[1], x1 - bw, M, bw, BH, right[2])
+    x1 = x1 - bw - M
+  end
+  local tw = x1 - x0
+  local th = U.text_h(size)
+  local t = fit_text(text, tw, size)
+  local lines = fit_lines(t, tw, size)
+  local top = math.max(BH, lines * th)
+  local lbl = U.label(t, x0, M + (top - lines * th) // 2, size, color)
+  lbl:width(tw)
+  return lbl, tw, lines, M + top + M
+end
+
+-- Bring ui.list in line with texts / cols: set what changed, add what is new,
+-- rebuild only when rows went away (the list cannot drop one row). fn_for(i)
+-- gives row i its callback when the row is created. Returns the old row count.
+local function patch(texts, cols, fn_for)
+  local l, rows, have = ui.list, ui.rows, ui.cols
+  local plain = wada.ui.colors.text
+  local n = #texts
+  if n < #rows then
+    l:clear()
+    rows, have = {}, {}
+    ui.rows, ui.cols = rows, have
+  end
+  local old = #rows
+  for i = 1, n do
+    local t, c = texts[i], cols and cols[i] or plain
+    if i > old then
+      l:add(t, fn_for and fn_for(i) or nil)
+      rows[i] = t
+      if c ~= plain then l:color(i, c) end
+      have[i] = c
+    else
+      if rows[i] ~= t then l:set(i, t); rows[i] = t end
+      if have[i] ~= c then l:color(i, c); have[i] = c end
+    end
+  end
+  return old
+end
+
+local function new_screen(name)
+  wada.ui.clear()
+  ui.screen, ui.list, ui.rows, ui.cols, ui.ids = name, nil, {}, {}, {}
+end
+
+-- ---- conversation list
+local function conv_row(c)
+  local dot = c.kind == "room" and "#" or DOTS[c.presence] or "○"
+  local name = (c.name and c.name ~= "") and c.name or c.jid or "?"
+  local s = dot .. " " .. name
+  if (c.unread or 0) > 0 then s = s .. "  (" .. c.unread .. ")" end
+  return s
+end
+
+local function list_mode()
+  local st = S.state
+  if st == "setup" then return "setup" end
+  if st == "deriving" then return "wait" end
+  if S.nconv > 0 then return "list" end
+  return S.synced and "empty" or "wait"
+end
+
+local function opener(i)
+  return function()
+    local id = ui.ids[i]
+    if id then show_chat(id) end
+  end
+end
+
+local function refresh_list()
+  local texts, ids = {}, {}
+  for i, c in ipairs(convs()) do texts[i], ids[i] = conv_row(c), c.id end
+  ui.ids = ids
+  patch(texts, nil, opener)
+end
+
+function show_list()
+  new_screen("list")
+  local U, C, M = wada.ui, wada.ui.colors, ui.M
+  ui.mode, ui.shown = list_mode(), status_text()
+  local y
+  ui.status, ui.status_w, ui.status_lines, y =
+    top_bar(nil, ui.shown, 12, status_color(), { "Settings", function() show_settings() end })
+  if ui.mode == "setup" then
+    U.button("Set up relay", M, y, btn_w("Set up relay"), ui.BH, function() setup() end)
+  elseif ui.mode == "empty" then
+    U.label(EMPTY, M, y, 12, C.sub):width(ui.W - 2 * M)
+  elseif ui.mode == "list" then
+    ui.list = U.list(M, y, ui.W - 2 * M, ui.H - y - M)
+    refresh_list()
+  end
+  ui.rev = S.rev
+end
+
+-- ---- chat
+local function refresh_chat()
+  local id = ui.conv
+  local cv = S.convs[id]
+  if cv and (cv.unread or 0) > 0 then mark_read(id) end   -- read while it is on screen
+  local C = wada.ui.colors
+  local own, plain = C.accent, C.text
+  local room = ui.room
+  local texts, cols, n = {}, {}, 0
+  for _, m in ipairs(msgs(id)) do
+    n = n + 1
+    if m.sender == "" then texts[n], cols[n] = "> " .. m.text, own
+    elseif room then texts[n], cols[n] = m.sender .. ": " .. m.text, plain
+    else texts[n], cols[n] = m.text, plain end
+  end
+  for _, p in ipairs(pending(id)) do
+    n = n + 1
+    if p.err then
+      texts[n] = "> " .. p.text .. " !" .. (p.reason and (" " .. p.reason) or "")
+    else
+      texts[n] = "> " .. p.text .. " …"
+    end
+    cols[n] = own
+  end
+  if patch(texts, cols) < n then ui.list:select(n) end   -- new rows: scroll to the newest
+  ui.rev = S.rev
+end
+
+local function write()
+  if S.prompting then return end
+  local id = ui.conv
+  S.prompting = true
+  wada.ui.input("Message", "", function(t)
+    S.prompting = false
+    if t then send(id, t) end      -- send() toasts a full outbox; empty text is ignored
+  end)
+end
+
+function show_chat(id)
+  local cv = S.convs[id]
+  if not cv then return end
+  new_screen("chat")
+  ui.conv, ui.room = id, cv.kind == "room"
+  local name = (cv.name and cv.name ~= "") and cv.name or cv.jid or "?"
+  local _, _, _, y = top_bar({ "Back", function() show_list() end }, name, 14, wada.ui.colors.text,
+                             { "Write", write })
+  ui.list = wada.ui.list(ui.M, y, ui.W - 2 * ui.M, ui.H - y - ui.M)
+  mark_read(id)                    -- R <conv> <newest seq> on the next request
+  refresh_chat()
+end
+
+-- ---- settings
+local function sd_on() return sget("sd") == "1" end
+
+local function settings_rows()
+  local t = { "Relay URL", "Passphrase" }
+  if ui.sd then t[#t + 1] = SD_ROW .. ": " .. (sd_on() and "On" or "Off") end
+  t[#t + 1] = ui.confirm and RESET_CONFIRM or RESET_ROW
+  return t
+end
+
+local function refresh_settings()
+  local C = wada.ui.colors
+  local t = settings_rows()
+  local cols = {}
+  for i = 1, #t do cols[i] = C.text end
+  if ui.confirm then cols[#t] = C.bad or C.accent end
+  patch(t, cols, function(i) return ui.acts[i] end)
+end
+
+-- Reset asks twice: the first press turns the row into a confirmation that
+-- lapses after CONFIRM_MS, the second (within that time) resets.
+local function press_reset()
+  if ui.confirm and now() < ui.confirm then
+    ui.confirm = nil
+    reset()
+    show_list()
+    return
+  end
+  ui.confirm = now() + CONFIRM_MS
+  refresh_settings()
+end
+
+function show_settings()
+  new_screen("settings")
+  local U, C, M = wada.ui, wada.ui.colors, ui.M
+  ui.confirm = nil
+  local _, _, _, y = top_bar({ "Back", function() show_list() end }, "Settings", 14, C.text, nil)
+  local acts = { function() setup() end, function() setup(true) end }
+  if ui.sd then
+    acts[#acts + 1] = function()
+      wada.store.set("sd", sd_on() and "0" or "1")   -- Task 8 keeps the history files
+      refresh_settings()
+    end
+  end
+  acts[#acts + 1] = press_reset
+  ui.acts = acts
+  local W, H = ui.W, ui.H
+  local desc_h = ui.sd and (U.text_lines(SD_DESC, W - 2 * M, 12) * ui.th12 + M) or 0
+  local lh = math.min(#acts * ui.ROWH + 4, H - y - M - desc_h)
+  ui.list = U.list(M, y, W - 2 * M, math.max(lh, ui.ROWH))
+  refresh_settings()
+  if ui.sd then
+    U.label(SD_DESC, M, y + math.max(lh, ui.ROWH) + M, 12, C.sub):width(W - 2 * M)
+  end
+end
+
+-- ---------------------------------------------------------------- app
 function app.on_open(w, h)
   S.cmids, S.failed, S.prompting = {}, {}, false
   load_outbox()
-  ui.status = wada.ui.label(status_text(), 6, 4, 14, wada.ui.colors.text)
-  ui.shown = status_text()
-  if not load_config() then
-    S.state = "setup"
-    ui.setup = wada.ui.button("Set up relay", 6, 28, 140, 32, setup)
-    setup()
-  end
+  metrics(w, h)
+  local caps = wada.sys.caps and wada.sys.caps() or {}
+  ui.sd = (caps.sd and caps.sdk_ext) and true or false
+  local configured = load_config()
+  if not configured then S.state = "setup" end
+  show_list()
+  if not configured then setup() end
   wada.timer.every(250)
 end
 
 function app.on_tick()
   step()
-  local s = status_text()
-  if s ~= ui.shown then
-    ui.shown = s
-    ui.status:set(s)
+  local scr = ui.screen
+  if scr == "list" then
+    if list_mode() ~= ui.mode then return show_list() end
+    local s = status_text()
+    if s ~= ui.shown then
+      if fit_lines(s, ui.status_w, 12) ~= ui.status_lines then return show_list() end
+      ui.shown = s
+      ui.status:set(fit_text(s, ui.status_w, 12))
+      ui.status:color(status_color())
+    end
+    if ui.list and S.rev ~= ui.rev then
+      ui.rev = S.rev
+      refresh_list()
+    end
+  elseif scr == "chat" then
+    if S.rev ~= ui.rev then refresh_chat() end
+  elseif scr == "settings" then
+    if S.state == "deriving" then return show_list() end   -- new keys: watch them come up
+    if ui.confirm and now() >= ui.confirm then
+      ui.confirm = nil
+      refresh_settings()
+    end
+  end
+end
+
+-- backspace leaves a chat or the settings (rows and buttons need no handling:
+-- the firmware's focus navigation presses them)
+function app.on_input(ev)
+  if ev.type == "key" and ev.key == "backspace" and (ui.screen == "chat" or ui.screen == "settings") then
+    show_list()
   end
 end
 
