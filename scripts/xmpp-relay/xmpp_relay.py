@@ -6,6 +6,8 @@ routing, config, XMPP session, main.
 slixmpp must only be imported lazily, never at module top level.
 
 Usage: python3 xmpp_relay.py relay.ini
+       python3 xmpp_relay.py --gen-vectors > seal_vectors.txt
+       python3 xmpp_relay.py --gen-reply-fixture > reply_fixture.txt
 """
 import asyncio
 import configparser
@@ -393,6 +395,66 @@ class SyncHandler:
             used += n
             out.append((row[0], line))
         return out, more, (out[-1][0] if out else 0)
+
+
+def gen_reply_fixture(out):
+    """A full (~6000-byte) initial-sync reply, for the Lua app's codec tests.
+
+    Deterministic: in-memory history, fixed timestamps, no clock reads.
+    """
+    class _Port:
+        online = True
+
+        def send(self, conv, text, cmid):
+            raise SendError("not-acceptable: room\tclosed")
+
+    h = History(":memory:")
+    convs = [
+        h.conv_for("alice@example.net", "chat", "Alice Liddell"),
+        h.conv_for("bob@example.org", "chat", "Bob \U0001f6b2"),
+        h.conv_for("lounge@conference.example.net", "room", "The\tLounge"),
+        h.conv_for("carol@example.com", "chat", "Carol Ångström"),
+        h.conv_for("dev@conference.example.org", "room", "Dev \\ team"),
+        h.conv_for("dave@example.net", "chat", "Dave"),
+        h.conv_for("erin@example.net", "chat", "Erin O'Brien"),
+        h.conv_for("radio@conference.example.net", "room", "Radio ☎ club"),
+    ]
+    h.set_presence(convs[0], "on")
+    h.set_presence(convs[1], "away")
+    h.set_presence(convs[2], "on")
+    h.set_presence(convs[4], "on")
+    texts = [
+        "Hi! Are you around later today?",
+        "line one\nline two\nline three",
+        "tab\tseparated\tvalues and a back\\slash",
+        "emoji time \U0001f600\U0001f44d\U0001f389 and more \u2603",
+        "héllo wörld, ça va? 你好，世界",
+        "C:\\Users\\nobody\\notes.txt is where I left it",
+        "Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.",
+        "ok",
+        "trailing newline\n",
+        "Long-ish message: the quick brown fox jumps over the lazy dog, twice. " * 2,
+    ]
+    senders = {
+        convs[0]: "alice@example.net", convs[1]: "bob@example.org",
+        convs[2]: "rabbit", convs[3]: "carol@example.com",
+        convs[4]: "hacker\twith tab", convs[5]: "dave@example.net",
+        convs[6]: "erin@example.net", convs[7]: "KD9XYZ",
+    }
+    ts = 1760000000
+    n = 0
+    for rnd in range(12):
+        for c in convs:
+            own = (n % 4 == 3)
+            h.add_message(c, "id-%d" % n, ts + 37 * n, "" if own else senders[c],
+                          texts[(n * 7 + rnd) % len(texts)])
+            n += 1
+    h.mark_read(convs[0], 5)
+    handler = SyncHandler(h, _Port())
+    handler.acks["cm-ok"] = "ok"
+    out.write(handler.handle(
+        "S\tfixture\t7\t0\nM\t%d\tcm-ok\thi\nM\t%d\tcm-err\tyo\nR\t%d\t3\n"
+        % (convs[0], convs[2], convs[1])))
 
 
 # ---------------------------------------------------------------- device endpoint
@@ -1167,8 +1229,12 @@ def main(argv):
         sys.stdout.reconfigure(encoding="utf-8", newline="\n")
         gen_vectors(sys.stdout)
         return 0
+    if "--gen-reply-fixture" in argv:
+        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+        gen_reply_fixture(sys.stdout)
+        return 0
     if len(argv) != 1 or argv[0].startswith("-"):
-        sys.stderr.write("usage: xmpp_relay.py relay.ini | --gen-vectors\n")
+        sys.stderr.write("usage: xmpp_relay.py relay.ini | --gen-vectors | --gen-reply-fixture\n")
         return 2
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")

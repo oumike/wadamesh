@@ -1,0 +1,85 @@
+P	7
+C	1	chat	alice@example.net	Alice Liddell	on	12
+C	2	chat	bob@example.org	Bob 🚲	away	12
+C	3	room	lounge@conference.example.net	The\tLounge	on	12
+C	4	chat	carol@example.com	Carol Ångström	off	0
+C	5	room	dev@conference.example.org	Dev \\ team	on	12
+C	6	chat	dave@example.net	Dave	off	12
+C	7	chat	erin@example.net	Erin O'Brien	off	12
+C	8	room	radio@conference.example.net	Radio ☎ club	off	0
+A	cm-ok	ok
+A	cm-err	err	not-acceptable: room\tclosed
+G	8	36	1760000851		emoji time 😀👍🎉 and more ☃
+G	1	37	1760000888	alice@example.net	line one\nline two\nline three
+G	2	38	1760000925	bob@example.org	trailing newline\n
+G	3	39	1760000962	rabbit	C:\\Users\\nobody\\notes.txt is where I left it
+G	4	40	1760000999		tab\tseparated\tvalues and a back\\slash
+G	5	41	1760001036	hacker\twith tab	Long-ish message: the quick brown fox jumps over the lazy dog, twice. Long-ish message: the quick brown fox jumps over the lazy dog, twice. 
+G	6	42	1760001073	dave@example.net	Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.
+G	7	43	1760001110	erin@example.net	emoji time 😀👍🎉 and more ☃
+G	8	44	1760001147		Hi! Are you around later today?
+G	1	45	1760001184	alice@example.net	trailing newline\n
+G	2	46	1760001221	bob@example.org	C:\\Users\\nobody\\notes.txt is where I left it
+G	3	47	1760001258	rabbit	tab\tseparated\tvalues and a back\\slash
+G	4	48	1760001295		Long-ish message: the quick brown fox jumps over the lazy dog, twice. Long-ish message: the quick brown fox jumps over the lazy dog, twice. 
+G	5	49	1760001332	hacker\twith tab	Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.
+G	6	50	1760001369	dave@example.net	emoji time 😀👍🎉 and more ☃
+G	7	51	1760001406	erin@example.net	Hi! Are you around later today?
+G	8	52	1760001443		ok
+G	1	53	1760001480	alice@example.net	C:\\Users\\nobody\\notes.txt is where I left it
+G	2	54	1760001517	bob@example.org	tab\tseparated\tvalues and a back\\slash
+G	3	55	1760001554	rabbit	Long-ish message: the quick brown fox jumps over the lazy dog, twice. Long-ish message: the quick brown fox jumps over the lazy dog, twice. 
+G	4	56	1760001591		Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.
+G	5	57	1760001628	hacker\twith tab	emoji time 😀👍🎉 and more ☃
+G	6	58	1760001665	dave@example.net	Hi! Are you around later today?
+G	7	59	1760001702	erin@example.net	ok
+G	8	60	1760001739		héllo wörld, ça va? 你好，世界
+G	1	61	1760001776	alice@example.net	tab\tseparated\tvalues and a back\\slash
+G	2	62	1760001813	bob@example.org	Long-ish message: the quick brown fox jumps over the lazy dog, twice. Long-ish message: the quick brown fox jumps over the lazy dog, twice. 
+G	3	63	1760001850	rabbit	Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.
+G	4	64	1760001887		emoji time 😀👍🎉 and more ☃
+G	5	65	1760001924	hacker\twith tab	Hi! Are you around later today?
+G	6	66	1760001961	dave@example.net	ok
+G	7	67	1760001998	erin@example.net	héllo wörld, ça va? 你好，世界
+G	8	68	1760002035		line one\nline two\nline three
+G	1	69	1760002072	alice@example.net	Long-ish message: the quick brown fox jumps over the lazy dog, twice. Long-ish message: the quick brown fox jumps over the lazy dog, twice. 
+G	2	70	1760002109	bob@example.org	Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.
+G	3	71	1760002146	rabbit	emoji time 😀👍🎉 and more ☃
+G	4	72	1760002183		Hi! Are you around later today?
+G	5	73	1760002220	hacker\twith tab	ok
+G	6	74	1760002257	dave@example.net	héllo wörld, ça va? 你好，世界
+G	7	75	1760002294	erin@example.net	line one\nline two\nline three
+G	8	76	1760002331		trailing newline\n
+G	1	77	1760002368	alice@example.net	Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.
+G	2	78	1760002405	bob@example.org	emoji time 😀👍🎉 and more ☃
+G	3	79	1760002442	rabbit	Hi! Are you around later today?
+G	4	80	1760002479		ok
+G	5	81	1760002516	hacker\twith tab	héllo wörld, ça va? 你好，世界
+G	6	82	1760002553	dave@example.net	line one\nline two\nline three
+G	7	83	1760002590	erin@example.net	trailing newline\n
+G	8	84	1760002627		C:\\Users\\nobody\\notes.txt is where I left it
+G	1	85	1760002664	alice@example.net	emoji time 😀👍🎉 and more ☃
+G	2	86	1760002701	bob@example.org	Hi! Are you around later today?
+G	3	87	1760002738	rabbit	ok
+G	4	88	1760002775		héllo wörld, ça va? 你好，世界
+G	5	89	1760002812	hacker\twith tab	line one\nline two\nline three
+G	6	90	1760002849	dave@example.net	trailing newline\n
+G	7	91	1760002886	erin@example.net	C:\\Users\\nobody\\notes.txt is where I left it
+G	8	92	1760002923		tab\tseparated\tvalues and a back\\slash
+G	1	93	1760002960	alice@example.net	Hi! Are you around later today?
+G	2	94	1760002997	bob@example.org	ok
+G	3	95	1760003034	rabbit	héllo wörld, ça va? 你好，世界
+G	4	96	1760003071		line one\nline two\nline three
+G	5	97	1760003108	hacker\twith tab	trailing newline\n
+G	6	98	1760003145	dave@example.net	C:\\Users\\nobody\\notes.txt is where I left it
+G	7	99	1760003182	erin@example.net	tab\tseparated\tvalues and a back\\slash
+G	8	100	1760003219		Long-ish message: the quick brown fox jumps over the lazy dog, twice. Long-ish message: the quick brown fox jumps over the lazy dog, twice. 
+G	1	101	1760003256	alice@example.net	ok
+G	2	102	1760003293	bob@example.org	héllo wörld, ça va? 你好，世界
+G	3	103	1760003330	rabbit	line one\nline two\nline three
+G	4	104	1760003367		trailing newline\n
+G	5	105	1760003404	hacker\twith tab	C:\\Users\\nobody\\notes.txt is where I left it
+G	6	106	1760003441	dave@example.net	tab\tseparated\tvalues and a back\\slash
+G	7	107	1760003478	erin@example.net	Long-ish message: the quick brown fox jumps over the lazy dog, twice. Long-ish message: the quick brown fox jumps over the lazy dog, twice. 
+G	8	108	1760003515		Meeting moved to 15:30, room 4B. Bring the radio and the spare battery pack.
+N	110	0

@@ -52,6 +52,26 @@ class SealTests(unittest.TestCase):
                     nv += 1
         self.assertGreaterEqual(nv, 8)
 
+    def test_reply_fixture_file(self):
+        # The Lua harness parses this; it must be what the generator produces now.
+        import io
+        buf = io.StringIO()
+        r.gen_reply_fixture(buf)
+        with open(os.path.join(HERE, "reply_fixture.txt"), encoding="utf-8", newline="") as f:
+            self.assertEqual(f.read(), buf.getvalue())
+        text = buf.getvalue()
+        n = len(text.encode("utf-8"))
+        self.assertTrue(5500 <= n <= 6000, n)
+        lines = [l.split("\t") for l in text.split("\n") if l]
+        self.assertEqual(lines[0][0], "P")
+        self.assertEqual(lines[-1][0], "N")
+        kinds = {l[0] for l in lines}
+        self.assertTrue({"C", "G", "A"} <= kinds, kinds)
+        self.assertTrue(any(l[0] == "G" and l[4] == "" for l in lines), "own message")
+        self.assertIn("\\t", text)
+        self.assertIn("\\n", text)
+        self.assertIn("\U0001f600", text)
+
 
 import tempfile
 from collections import Counter

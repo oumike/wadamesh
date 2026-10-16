@@ -2214,6 +2214,164 @@ scenarios.harness_crypto = function()
   print("  crypto, http_post, input and random mocks ok")
 end
 
+-- repo-relative file next to the app under test (APP_PATH may be relative)
+local function repo_file(rel)
+  local root = APP_PATH:match("^(.-)deploy/apps/") or ""
+  local f = assert(io.open(root .. rel, "rb"), "cannot open " .. root .. rel)
+  local s = f:read("a"); f:close()
+  return s
+end
+local function unhex(h) return (h:gsub("..", function(x) return string.char(tonumber(x, 16)) end)) end
+
+-- instructions one call costs (exact: hook every instruction)
+local function measure(fn, ...)
+  local n = 0
+  debug.sethook(function() n = n + 1 end, "", 1)
+  local r = table.pack(pcall(fn, ...))
+  debug.sethook()
+  assert(r[1], r[2])
+  return n, table.unpack(r, 2, r.n)
+end
+
+local function xmpp_derive(T, pw)
+  local st = T.kdf_new(pw)
+  local calls = 0
+  repeat
+    calls = calls + 1
+    local done
+    assert(guarded(BUDGET, function() done = T.kdf_step(st, 100) end), "kdf_step over budget")
+  until done or calls > 100
+  assert(st.enc and st.mac and #st.enc == 32 and #st.mac == 32, "kdf did not finish")
+  return st.enc, st.mac, calls
+end
+
+scenarios.xmpp_seal_vectors = function()
+  cfg = { w = 320, h = 196, caps = { sdk_ext = true, keyboard = true, touch = false } }
+  wada = build_wada()
+  local app = load_app()
+  local T = assert(app._t, "app._t missing")
+  local hex = wada.crypto.hex
+  -- fields(): TAB split keeping empty fields
+  local f = T.fields("a\t\tb\t")
+  assert(#f == 4 and f[1] == "a" and f[2] == "" and f[3] == "b" and f[4] == "", "fields keeps empties")
+  assert(#T.fields("") == 1 and T.fields("")[1] == "", "fields of empty line")
+  -- K / V vectors from the relay
+  local keys, nk, nv = {}, 0, 0
+  for line in repo_file("scripts/xmpp-relay/seal_vectors.txt"):gmatch("([^\n]*)\n") do
+    local p = T.fields(line)
+    if p[1] == "K" then
+      local e, m = xmpp_derive(T, p[2])
+      assert(hex(e) == p[3] and hex(m) == p[4], "K mismatch for " .. p[2])
+      keys[p[2]] = { e, m }; nk = nk + 1
+    elseif p[1] == "V" then
+      assert(#p == 6, "V line must have 6 fields, got " .. #p)
+      local k = assert(keys[p[2]], "V before K")
+      local nonce, plain, want = unhex(p[4]), unhex(p[5]), p[6]
+      local got, opened
+      assert(guarded(BUDGET, function() got = T.seal(k[1], k[2], p[3], nonce, plain) end))
+      assert(hex(got) == want, "seal mismatch, len " .. #plain)
+      assert(guarded(BUDGET, function() opened = T.open(k[1], k[2], p[3], got) end))
+      assert(opened == plain, "open mismatch, len " .. #plain)
+      -- tamper: flip one byte in nonce, ciphertext and tag; wrong direction
+      for _, at in ipairs({ 1, 17, #got }) do
+        local b = got:byte(at) ~ 1
+        local bad = got:sub(1, at - 1) .. string.char(b) .. got:sub(at + 1)
+        assert(T.open(k[1], k[2], p[3], bad) == nil, "tampered byte " .. at .. " accepted")
+      end
+      assert(T.open(k[1], k[2], p[3] == "Q" and "P" or "Q", got) == nil, "wrong dir accepted")
+      nv = nv + 1
+    end
+  end
+  assert(nk >= 2 and nv >= 9, "too few vectors")
+  local k1 = keys["correct horse battery staple"]
+  assert(T.open(k1[1], k1[2], "P", ("x"):rep(31)) == nil, "short input")
+  assert(T.open(k1[1], k1[2], "P", "") == nil, "empty input")
+  -- nonce(): 16 bytes from four random() calls, different each time
+  local n1, n2 = T.nonce(), T.nonce()
+  assert(#n1 == 16 and #n2 == 16 and n1 ~= n2, "nonce")
+  -- esc / unesc / cut_utf8
+  local s = "a\tb\nc\\d\u{1F600}"
+  assert(not T.esc(s):find("[\t\n]"), "esc leaves raw tab/newline")
+  assert(T.unesc(T.esc(s)) == s, "esc round trip")
+  assert(T.esc("x\r\ny") == "x\\ny", "CR dropped")
+  assert(T.unesc("a\\qb\\") == "aqb\\", "unknown escape / trailing backslash like relay")
+  local cut = T.cut_utf8(("\u{E9}"):rep(600), 1000)
+  assert(#cut <= 1000 and #cut == 1000 and cut:byte(#cut) ~= 0xC3, "cut on boundary")
+  local cut2 = T.cut_utf8("ab" .. ("\u{1F600}"):rep(300), 1000)
+  assert(#cut2 == 998, "cut drops partial 4-byte char: " .. #cut2)
+  assert(T.cut_utf8("short", 1000) == "short")
+  -- build_request
+  local rq = T.build_request("sid1", 42, 7,
+    { { conv = 3, cmid = "m1", text = "hi\tthere\n" .. ("\u{E9}"):rep(600) } }, { { conv = 2, seq = 9 } })
+  local rl = {}
+  for l in rq:gmatch("([^\n]*)\n") do rl[#rl + 1] = T.fields(l) end
+  assert(#rl == 3 and rq:sub(-1) == "\n", "request lines")
+  assert(rl[1][1] == "S" and rl[1][2] == "sid1" and rl[1][3] == "42" and rl[1][4] == "7", "S line")
+  assert(rl[2][1] == "M" and rl[2][2] == "3" and rl[2][3] == "m1" and #rl[2] == 4, "M line")
+  local mt = T.unesc(rl[2][4])
+  assert(mt:sub(1, 9) == "hi\tthere\n" and #mt <= 1000, "M text escaped and cut")
+  assert(rl[3][1] == "R" and rl[3][2] == "2" and rl[3][3] == "9", "R line")
+  -- parse_reply: small hand-written reply with E, unknown line types
+  local r = T.parse_reply("P\t5\nE\txmpp-offline\nZ\twhat\nC\t1\troom\tr@c.x\tA\\tB\ton\t3\n" ..
+    "G\t1\t9\t100\t\tmine\\nok\nA\tc1\tok\nA\tc2\terr\toffline\nN\t9\t1\n")
+  assert(r and r.q == 5 and r.offline == true and r.cursor == 9 and r.more == true, "small reply header")
+  assert(#r.convs == 1 and r.convs[1].id == 1 and r.convs[1].kind == "room" and r.convs[1].name == "A\tB"
+    and r.convs[1].presence == "on" and r.convs[1].unread == 3 and r.convs[1].jid == "r@c.x", "C line")
+  assert(#r.msgs == 1 and r.msgs[1].sender == "" and r.msgs[1].text == "mine\nok" and r.msgs[1].seq == 9
+    and r.msgs[1].ts == 100 and r.msgs[1].conv == 1, "G line")
+  assert(#r.acks == 2 and r.acks[1].ok == true and r.acks[2].ok == false and r.acks[2].reason == "offline", "A lines")
+  assert(T.parse_reply("N\t1\t0\n") == nil, "reply without P")
+  assert(T.parse_reply("P\t1\nG\t1\t2\t3\tx\ty\n") == nil, "reply without N (truncated)")
+  -- the relay-generated 6000-byte reply: seal it, then open + parse in ONE callback
+  local plain = repo_file("scripts/xmpp-relay/reply_fixture.txt")
+  assert(#plain > 5500 and #plain <= 6000, "fixture size " .. #plain)
+  local sealed = T.seal(k1[1], k1[2], "P", T.nonce(), plain)
+  local rep
+  assert(guarded(BUDGET, function()
+    local pt = T.open(k1[1], k1[2], "P", sealed)
+    rep = pt and T.parse_reply(pt)
+  end), "open + parse of the 6000-byte reply over budget")
+  assert(rep, "fixture did not open/parse")
+  local cost = measure(function() return T.parse_reply(T.open(k1[1], k1[2], "P", sealed)) end)
+  local ocost = measure(T.open, k1[1], k1[2], "P", sealed)
+  assert(rep.q == 7 and rep.offline == false and rep.more == false and rep.cursor == 110, "fixture header")
+  assert(#rep.convs == 8 and #rep.acks == 2, "fixture convs/acks")
+  assert(rep.acks[1].cmid == "cm-ok" and rep.acks[1].ok and rep.acks[2].reason == "not-acceptable: room\tclosed")
+  assert(rep.convs[3].name == "The\tLounge" and rep.convs[5].name == "Dev \\ team", "names unescaped")
+  local own, tabbed, nl, emoji, last = 0, false, false, false, 0
+  for _, m in ipairs(rep.msgs) do
+    assert(m.seq > last, "ascending seq"); last = m.seq
+    if m.sender == "" then own = own + 1 end
+    if m.sender == "hacker\twith tab" then tabbed = true end
+    if m.text:find("\n", 1, true) then nl = true end
+    if m.text:find("\u{1F600}", 1, true) then emoji = true end
+  end
+  assert(#rep.msgs >= 60 and own > 0 and tabbed and nl and emoji, "fixture messages")
+  print(string.format("  %d K, %d V vectors ok; %d-byte reply: open %d, open+parse %d instructions (budget %d)",
+    nk, nv, #plain, ocost, cost, BUDGET))
+end
+
+scenarios.xmpp_kdf_budget = function()
+  cfg = { w = 320, h = 196, caps = { sdk_ext = true, keyboard = true, touch = false } }
+  wada = build_wada()
+  local T = assert(load_app()._t, "app._t missing")
+  local st = T.kdf_new("correct horse battery staple")
+  local calls, worst, done = 0, 0, false
+  while not done do
+    calls = calls + 1
+    assert(calls <= 25, "kdf needs more than 25 kdf_step(st, 100) calls")
+    assert(guarded(BUDGET, function() done = T.kdf_step(st, 100) end), "kdf_step over budget")
+    if not done then
+      local n = measure(T.kdf_step, T.kdf_new("x"), 100)
+      if n > worst then worst = n end
+    end
+  end
+  assert(wada.crypto.hex(st.enc) == "eee73a31a544ac716f9eea8c10ff8fce2c5ffac710af3758e115cdaf2b3aa849", "enc")
+  assert(st.pw == nil, "passphrase kept in kdf state after done")
+  assert(T.kdf_step(st, 100) == true, "done stays done")
+  print(string.format("  kdf done in %d calls, ~%d instructions per kdf_step(st, 100)", calls, worst))
+end
+
 -- True (and says so) when this app has no scenarios of its own. Returning a
 -- truthy value makes the dispatch below pick an EMPTY list rather than running
 -- someone else's tests against it.
@@ -2236,7 +2394,7 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   or APP_PATH:find("/protreck/", 1, true)
   and { "protreck_tdeck", "protreck_v4", "protreck_no_gps", "protreck_chrono", "protreck_timer", "protreck_alti", "protreck_cost" }
   or APP_PATH:find("/xmpp/", 1, true)
-  and { "harness_crypto" }
+  and { "harness_crypto", "xmpp_seal_vectors", "xmpp_kdf_budget" }
   or APP_PATH:find("/ping/", 1, true)
   and { "ping_tdeck", "ping_v4", "ping_no_contacts", "ping_round_trip", "ping_auto_reply", "ping_cost" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no
