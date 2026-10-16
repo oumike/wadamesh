@@ -2372,6 +2372,493 @@ scenarios.xmpp_kdf_budget = function()
   print(string.format("  kdf done in %d calls, ~%d instructions per kdf_step(st, 100)", calls, worst))
 end
 
+-- ---- xmpp: setup, sync engine and outbox (Task 6) --------------------------
+local XM = { tick = 0, cb = 0 }   -- worst on_tick / async-callback instruction counts
+local XM_URL, XM_SID = "http://relay.test:8765", "00112233aabbccdd"
+local function L(...) return table.concat({ ... }, "\t") .. "\n" end
+
+-- guarded() that also reports the instruction count (to within 100)
+local function xm_metered(fn, ...)
+  local n = 0
+  debug.sethook(function()
+    n = n + 100
+    if n >= BUDGET then error("instruction budget exceeded (app tick too long)", 0) end
+  end, "", 100)
+  local ok, err = pcall(fn, ...)
+  debug.sethook()
+  if not ok then fails = fails + 1; print("  APP ERROR: " .. tostring(err)) end
+  return n
+end
+
+-- tick() at the app's 250 ms timer, metering every callback
+local function xm_tick(app, n, dt)
+  dt = dt or 250
+  for _ = 1, (n or 1) do
+    clock_ms = clock_ms + dt
+    if net_pending then
+      local p = net_pending; net_pending = nil
+      local st, reply = -1, nil
+      if cfg.relay then
+        local s2, r2 = cfg.relay(p.url, p.body)
+        if type(s2) == "number" and s2 >= 200 and s2 < 300 then st, reply = 200, r2 end
+      end
+      local c = xm_metered(p.cb, st, reply)
+      if c > XM.cb then XM.cb = c end
+    end
+    if input_pending then
+      local p = input_pending; input_pending = nil
+      local v = cfg.inputs and table.remove(cfg.inputs, 1)
+      if v == false then v = nil end
+      xm_metered(p.cb, v)
+    end
+    if app.on_tick then
+      local c = xm_metered(app.on_tick, dt)
+      if c > XM.tick then XM.tick = c end
+    end
+  end
+end
+
+local function xm_until(app, pred, max_ticks, what)
+  for _ = 1, max_ticks or 400 do
+    if pred() then return end
+    xm_tick(app)
+  end
+  assert(pred(), "timed out waiting for " .. (what or "condition"))
+end
+
+local xm_keycache = {}
+local function xm_keys(T, pw)
+  pw = pw or "pw"
+  if not xm_keycache[pw] then
+    local e, m = xmpp_derive(T, pw)
+    xm_keycache[pw] = { e, m }
+  end
+  return xm_keycache[pw][1], xm_keycache[pw][2]
+end
+
+local function xm_world()
+  cfg = { w = 320, h = 196, caps = { sdk_ext = true, keyboard = true, touch = false } }
+  wada = build_wada()
+  storekv = {}
+  XM.tick, XM.cb = 0, 0
+end
+
+-- the store as a finished setup leaves it
+local function xm_configured_store(T)
+  local e, m = xm_keys(T)
+  storekv = { url = XM_URL, ek = wada.crypto.hex(e), mk = wada.crypto.hex(m), sid = XM_SID, qb = "0" }
+end
+
+-- counts wada.store.set calls per key
+local function xm_count_writes()
+  local w, set = {}, wada.store.set
+  wada.store.set = function(k, v) w[k] = (w[k] or 0) + 1; return set(k, v) end
+  return w
+end
+
+local function xm_open(app)
+  assert(guarded(BUDGET, app.on_open, cfg.w, cfg.h), "on_open failed")
+end
+
+-- Relay stub: every request must open with the scenario keys; it is recorded
+-- decoded ({url, at, sid, q, cursor, m = {{conv, cmid, text}}, r = {{conv, seq}}}).
+-- handler(req, n) returns reply plaintext (sealed here), -1 (unreachable) or
+-- { raw = bytes } sent as-is.
+local function xm_relay(T, handler)
+  local e, m = xm_keys(T)
+  local log = {}
+  cfg.relay = function(url, body)
+    local pt = T.open(e, m, "Q", body)
+    assert(pt, "request did not open with the scenario keys")
+    local req = { url = url, at = clock_ms, m = {}, r = {} }
+    for l in pt:gmatch("([^\n]*)\n") do
+      local f = T.fields(l)
+      if f[1] == "S" then req.sid, req.q, req.cursor = f[2], tonumber(f[3]), tonumber(f[4])
+      elseif f[1] == "M" then req.m[#req.m + 1] = { conv = tonumber(f[2]), cmid = f[3], text = T.unesc(f[4]) }
+      elseif f[1] == "R" then req.r[#req.r + 1] = { conv = tonumber(f[2]), seq = tonumber(f[3]) } end
+    end
+    assert(req.sid and req.q and req.cursor, "request without a valid S line")
+    log[#log + 1] = req
+    local out = handler(req, #log)
+    if out == -1 or out == nil then return -1 end
+    if type(out) == "table" then return 200, out.raw end
+    return 200, T.seal(e, m, "P", T.nonce(), out)
+  end
+  return log
+end
+
+scenarios.xmpp_setup = function()
+  xm_world()
+  local app = load_app()
+  local T = assert(app._t, "app._t missing")
+  local e, m = xm_keys(T, "pw")
+  local hex = wada.crypto.hex
+  local posts = {}
+  local post = wada.net.http_post
+  wada.net.http_post = function(url, body, ct, cb, mr)
+    posts[#posts + 1] = { url = url, ct = ct, mr = mr }
+    return post(url, body, ct, cb, mr)
+  end
+  local log = xm_relay(T, function(req) return L("P", req.q) .. L("N", 0, 0) end)
+  -- first run prompts; cancelling leaves the app in setup with nothing stored
+  cfg.inputs = { false }
+  xm_open(app)
+  assert(T.state() == "setup" and T.header() == nil, "fresh app must be in setup")
+  xm_tick(app, 3)
+  assert(T.state() == "setup" and next(storekv) == nil, "cancel must leave setup and store nothing")
+  -- a non-http URL is refused with a toast
+  cfg.inputs = { "https://relay.test" }
+  T.setup()
+  xm_tick(app, 3)
+  assert(T.state() == "setup" and next(storekv) == nil and #toasts > 0, "https:// URL must be refused")
+  -- real setup, URL with a trailing slash
+  cfg.inputs = { XM_URL .. "/", "pw" }
+  T.setup()
+  local seen, kdf_ticks = { T.state() }, 0
+  xm_until(app, function()
+    local s = T.state()
+    if s == "deriving" then kdf_ticks = kdf_ticks + 1 end
+    if seen[#seen] ~= s then seen[#seen + 1] = s end
+    return s == "online"
+  end, 60, "online after the KDF")
+  print(string.format("  states %s; KDF in %d ticks, worst tick ~%d instructions (budget %d)",
+    table.concat(seen, " > "), kdf_ticks, XM.tick, BUDGET))
+  assert(table.concat(seen, ",") == "setup,deriving,online", "state sequence " .. table.concat(seen, ","))
+  assert(storekv.url == XM_URL, "url stored without the trailing slash: " .. tostring(storekv.url))
+  assert(storekv.ek == hex(e) and storekv.mk == hex(m), "derived keys stored as hex")
+  assert(type(storekv.sid) == "string" and #storekv.sid == 16 and storekv.sid:match("^[0-9a-f]+$"), "sid: " .. tostring(storekv.sid))
+  assert(storekv.qb == "1000", "qb reserved: " .. tostring(storekv.qb))
+  for k, v in pairs(storekv) do
+    assert(not tostring(v):find("pw", 1, true), "passphrase leaked into store key " .. k)
+  end
+  assert(T.header() == "Online", "header " .. tostring(T.header()))
+  xm_until(app, function() return #log >= 1 end, 4, "first request")
+  assert(log[1].url == XM_URL .. "/w" and log[1].sid == storekv.sid and log[1].cursor == 0 and log[1].q == 0,
+    "first request " .. log[1].url .. " q=" .. log[1].q)
+  assert(posts[1].ct == "application/octet-stream" and posts[1].mr == 8192, "content type / max_reply")
+  -- reopen: no prompt, same sid, q from the next reserved block
+  xm_until(app, function() return net_pending == nil end, 4)
+  if app.on_close then guarded(BUDGET, app.on_close) end
+  local sid = storekv.sid
+  local app2 = load_app()
+  cfg.inputs = {}
+  xm_open(app2)
+  assert(app2._t.state() == "online", "configured app opens online")
+  xm_until(app2, function() return #log >= 2 end, 4, "request after reopen")
+  assert(log[2].sid == sid and log[2].q == 1000 and storekv.qb == "2000", "reopen q " .. log[2].q)
+  -- Reset forgets keys and makes a new sid at the next setup
+  xm_until(app2, function() return net_pending == nil end, 4)
+  app2._t.reset()
+  assert(app2._t.state() == "setup" and (storekv.ek or "") == "" and (storekv.mk or "") == "", "reset keeps keys")
+  cfg.inputs = { XM_URL, "pw" }
+  app2._t.setup()
+  xm_until(app2, function() return #log >= 3 end, 60, "request after re-setup")
+  assert(log[3].sid ~= sid and #storekv.sid == 16, "Reset must regenerate sid")
+  print("  setup, reopen and reset ok")
+end
+
+scenarios.xmpp_sync = function()
+  xm_world()
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local writes = xm_count_writes()
+  local mode = "script"
+  local log = xm_relay(T, function(req, n)
+    if mode == "more" then return L("P", req.q) .. L("N", 41, 1) end
+    if n == 1 then
+      return L("P", req.q) .. L("C", 1, "chat", "alice@x.test", "Alice", "on", 2)
+        .. L("C", "x", "chat", "bad@x.test", "Bad", "on", 0)          -- malformed id: skipped
+        .. L("G", 1, 40, 1700000000, "alice@x.test", "hi\\tthere")
+        .. L("G", 1, "zz", 1700000001, "alice@x.test", "bad seq")    -- malformed seq: skipped
+        .. L("G", 99, 41, 1700000002, "who", "unknown conv")         -- unknown conv: dropped
+        .. L("G", 1, 41, 1700000003, "", "mine")
+        .. L("N", 41, 0)
+    elseif n == 2 then
+      return L("P", req.q) .. L("N", 41, 1)
+    end
+    return L("P", req.q) .. L("N", 41, 0)
+  end)
+  xm_open(app)
+  assert(T.state() == "online", "configured app opens online")
+  xm_until(app, function() return #log >= 1 end, 4, "first request")
+  assert(log[1].cursor == 0 and log[1].q == 0 and log[1].sid == XM_SID, "first request S line")
+  xm_until(app, function() return #log >= 2 end, 40, "second request")
+  local gap = log[2].at - log[1].at
+  assert(log[2].cursor == 41, "cursor after N 41: " .. log[2].cursor)
+  assert(gap >= 5000 and gap <= 5500, "poll gap " .. gap)
+  local cs = T.convs()
+  assert(#cs == 1 and cs[1].id == 1 and cs[1].name == "Alice" and cs[1].unread == 2 and cs[1].presence == "on"
+    and cs[1].kind == "chat" and cs[1].jid == "alice@x.test", "conversation from C line")
+  local ms = T.msgs(1)
+  assert(#ms == 2 and ms[1].seq == 40 and ms[1].text == "hi\tthere" and ms[1].sender == "alice@x.test"
+    and ms[1].ts == 1700000000 and ms[2].seq == 41 and ms[2].sender == "" and ms[2].text == "mine", "messages")
+  assert(#T.msgs(99) == 0 and #T.msgs(1234) == 0, "unknown conversation must stay empty")
+  -- more = 1: the next request follows on the next tick
+  xm_until(app, function() return #log >= 3 end, 2, "more=1 resync")
+  assert(log[3].at - log[2].at <= 250, "more=1 gap " .. (log[3].at - log[2].at))
+  XM.tick = 0
+  xm_until(app, function() return #log >= 50 end, 50 * 25, "50 syncs")
+  for i = 2, #log do assert(log[i].q == log[i - 1].q + 1, "q must increase by one") end
+  assert(writes.qb == 1 and storekv.qb == "1000", "qb written " .. tostring(writes.qb) .. " times in 50 syncs")
+  for k, v in pairs(writes) do assert(k == "qb", "store written during sync: " .. k) end
+  print(string.format("  50 syncs, qb written once; steady on_tick worst ~%d, reply callback worst ~%d instructions",
+    XM.tick, XM.cb))
+  assert(XM.tick < 25000, "steady-state tick too expensive: " .. XM.tick)
+  -- mark_read: unread cleared now, R sent once with the newest seq
+  T.mark_read(1)
+  assert(T.convs()[1].unread == 0, "mark_read clears unread")
+  local n0 = #log
+  xm_until(app, function() return #log > n0 + 1 end, 60, "two syncs after mark_read")
+  assert(#log[n0 + 1].r == 1 and log[n0 + 1].r[1].conv == 1 and log[n0 + 1].r[1].seq == 41, "R line")
+  assert(#log[n0 + 2].r == 0, "R must not repeat after a successful sync")
+  -- qb rollover: back-to-back syncs (more = 1) past the reserved block
+  mode = "more"
+  xm_until(app, function() return #log > 0 and log[#log].q >= 1001 end, 1200, "q past 1000")
+  assert(writes.qb == 2 and storekv.qb == "2000", "second block reserved once: " .. writes.qb .. " " .. storekv.qb)
+  mode = "idle"
+  xm_until(app, function() return net_pending == nil end, 4)
+  xm_tick(app, 2)
+  if app.on_close then guarded(BUDGET, app.on_close) end
+  local app2 = load_app()
+  xm_open(app2)
+  local n1 = #log
+  xm_until(app2, function() return #log > n1 end, 4, "request after reopen")
+  assert(log[#log].q == 2000 and log[#log].cursor == 0 and storekv.qb == "3000", "reopen: q from qb, cursor 0")
+  print("  qb blocks ok; reopen starts at q " .. log[#log].q)
+end
+
+scenarios.xmpp_failures = function()
+  xm_world()
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local e, m = xm_keys(T)
+  local mode = "down"
+  local log = xm_relay(T, function(req)
+    if mode == "down" then return -1 end
+    if mode == "denied" then return { raw = "DENIED" } end
+    if mode == "badtag" then
+      local s = T.seal(e, m, "P", T.nonce(), L("P", req.q) .. L("N", 0, 0))
+      return { raw = s:sub(1, -2) .. string.char(s:byte(-1) ~ 1) }
+    end
+    if mode == "wrongq" then
+      return L("P", req.q + 5) .. L("C", 1, "chat", "a@x.test", "A", "on", 0) .. L("N", 9, 0)
+    end
+    if mode == "offline" then return L("P", req.q) .. "E\txmpp-offline\n" .. L("N", 0, 0) end
+    return L("P", req.q) .. L("N", 0, 0)
+  end)
+  xm_open(app)
+  -- six failures at the normal 5 s interval, then back off to 30 s
+  xm_until(app, function() return #log >= 6 end, 6 * 25, "six failed requests")
+  for i = 2, 6 do
+    local gap = log[i].at - log[i - 1].at
+    assert(gap >= 5000 and gap <= 5500, "retry gap " .. i .. ": " .. gap)
+  end
+  assert(T.state() == "unreachable" and T.header() == "Relay unreachable", "header " .. tostring(T.header()))
+  xm_until(app, function() return #log >= 7 end, 32000 // 250, "seventh request")
+  assert(log[7].at - log[6].at >= 30000, "backoff gap " .. (log[7].at - log[6].at))
+  mode = "ok"
+  xm_until(app, function() return #log >= 9 end, 40000 // 250, "recovery")
+  assert(T.header() == "Online", "recovered header " .. tostring(T.header()))
+  assert(log[9].at - log[8].at <= 5500, "interval back to 5 s after success")
+  -- E xmpp-offline
+  mode = "offline"
+  local n = #log
+  xm_until(app, function() return #log > n end, 25)
+  assert(T.state() == "xmpp_offline" and T.header() == "Relay offline from XMPP", "offline header " .. tostring(T.header()))
+  -- three bad tags in a row
+  mode = "badtag"
+  n = #log
+  xm_until(app, function() return #log >= n + 2 end, 50)
+  assert(T.header() ~= "Relay reply corrupted", "two bad replies must not say corrupted yet")
+  xm_until(app, function() return #log >= n + 3 end, 25)
+  assert(T.header() == "Relay reply corrupted", "three bad replies: " .. tostring(T.header()))
+  mode = "ok"
+  n = #log
+  xm_until(app, function() return #log > n end, 25)
+  assert(T.header() == "Online", "good reply clears corrupted")
+  -- reply echoing the wrong q: dropped
+  mode = "wrongq"
+  n = #log
+  xm_until(app, function() return #log > n end, 25)
+  assert(#T.convs() == 0, "reply with the wrong q must be dropped")
+  assert(T.header() ~= "Online", "wrong q counts as a bad reply")
+  mode = "ok"
+  xm_until(app, function() return #log > n + 1 end, 25)
+  assert(log[n + 2].cursor == 0, "cursor must not move on a dropped reply: " .. log[n + 2].cursor)
+  -- DENIED: no further requests until settings change
+  mode = "denied"
+  n = #log
+  xm_until(app, function() return #log > n end, 25)
+  assert(T.state() == "denied" and T.header() == "Passphrase rejected — check Settings", "denied header " .. tostring(T.header()))
+  n = #log
+  xm_tick(app, 200000 // 250)
+  assert(#log == n, "requests after DENIED: " .. (#log - n))
+  mode = "ok"
+  cfg.inputs = { XM_URL, "pw" }
+  T.setup()
+  xm_until(app, function() return #log > n end, 60, "polling resumes after setup")
+  xm_tick(app, 2)
+  assert(T.header() == "Online", "online after new settings")
+  print("  backoff, DENIED, corrupted, wrong q and xmpp-offline ok")
+end
+
+scenarios.xmpp_relay_reset = function()
+  xm_world()
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local log = xm_relay(T, function(req, n)
+    if n == 1 then
+      return L("P", req.q) .. L("C", 1, "chat", "a@x.test", "A", "on", 1) .. L("C", 2, "room", "r@c.x.test", "Room", "on", 0)
+        .. L("G", 1, 41, 1700000000, "a@x.test", "old") .. L("N", 41, 0)
+    elseif n == 2 then
+      return L("P", req.q) .. L("C", 3, "chat", "z@x.test", "Z", "on", 0) .. L("N", 7, 0)
+    elseif n == 3 then
+      return L("P", req.q) .. L("C", 1, "chat", "a@x.test", "A", "on", 1) .. L("G", 1, 5, 1700000100, "a@x.test", "new")
+        .. L("N", 7, 0)
+    end
+    return L("P", req.q) .. L("N", 7, 0)
+  end)
+  xm_open(app)
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4)
+  assert(#T.convs() == 2 and #T.msgs(1) == 1, "two conversations after the first sync")
+  xm_until(app, function() return #log >= 2 end, 40)
+  assert(log[2].cursor == 41, "cursor 41: " .. log[2].cursor)
+  assert(#T.convs() == 0 and #T.msgs(1) == 0, "relay behind the device must clear the view")
+  xm_until(app, function() return #log >= 3 end, 2, "immediate resync from 0")
+  assert(log[3].cursor == 0, "resync cursor " .. log[3].cursor)
+  xm_until(app, function() return #log >= 4 end, 40)
+  assert(log[4].cursor == 7, "cursor after resync " .. log[4].cursor)
+  local ms = T.msgs(1)
+  assert(#T.convs() == 1 and #ms == 1 and ms[1].seq == 5 and ms[1].text == "new", "view rebuilt from the relay")
+  print("  relay reset detected, resynced from 0")
+end
+
+scenarios.xmpp_outbox = function()
+  xm_world()
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local writes = xm_count_writes()
+  local mode = "down"
+  local delivered, ndelivered = {}, 0   -- relay-side cmid dedupe
+  local log = xm_relay(T, function(req)
+    if mode == "down" then return -1 end
+    local out = L("P", req.q)
+    for _, mm in ipairs(req.m) do
+      if not delivered[mm.cmid] then delivered[mm.cmid] = mm.text; ndelivered = ndelivered + 1 end
+      if mode == "err" then out = out .. L("A", mm.cmid, "err", "room\\tclosed")
+      elseif mode == "errblank" then out = out .. L("A", mm.cmid, "err", "")
+      else out = out .. L("A", mm.cmid, "ok") end
+    end
+    return out .. L("N", 0, 0)
+  end)
+  local function m_lines(s)
+    local t = {}
+    for l in ((s or "") ~= "" and (s .. "\n") or ""):gmatch("([^\n]*)\n") do t[#t + 1] = T.fields(l) end
+    return t
+  end
+  xm_open(app)
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4, "first (failing) request")
+  local text = "hello\tworld\nline \u{1F600}"
+  local cmid = T.send(1, text)
+  assert(type(cmid) == "string" and #cmid == 8 and cmid:match("^[0-9a-f]+$"), "cmid " .. tostring(cmid))
+  local ol = m_lines(storekv.out)
+  assert(#ol == 1 and ol[1][1] == "M" and ol[1][2] == "1" and ol[1][3] == cmid and T.unesc(ol[1][4]) == text,
+    "out holds one M line: " .. tostring(storekv.out))
+  assert(writes.out == 1, "out written once on send")
+  local p = T.pending(1)
+  assert(#p == 1 and p[1].cmid == cmid and p[1].text == text and not p[1].err, "pending entry")
+  xm_until(app, function() return #log >= 2 and net_pending == nil end, 25, "request carrying M")
+  assert(#log[2].m == 1 and log[2].m[1].cmid == cmid and log[2].m[1].text == text and log[2].m[1].conv == 1,
+    "M line sent")
+  assert(log[2].at - log[1].at < 5000, "a send syncs right away")
+  -- app closes before the ack; a new session resends the same cmid
+  if app.on_close then guarded(BUDGET, app.on_close) end
+  local app2 = load_app()
+  local T2 = app2._t
+  mode = "ok"
+  xm_open(app2)
+  assert(#T2.pending(1) == 1, "outbox restored from store")
+  xm_until(app2, function() return #log >= 3 and net_pending == nil end, 4, "resend")
+  assert(#log[3].m == 1 and log[3].m[1].cmid == cmid, "resent with the same cmid")
+  assert((storekv.out or "") == "", "ack ok empties out: " .. tostring(storekv.out))
+  assert(#T2.pending(1) == 0, "acked send no longer pending")
+  local total = 0
+  for _, r in ipairs(log) do for _, mm in ipairs(r.m) do if mm.cmid == cmid then total = total + 1 end end end
+  assert(total == 2 and ndelivered == 1, "M lines for cmid: " .. total .. ", relay messages " .. ndelivered)
+  assert(writes.out == 2, "out written on send and on ack only: " .. writes.out)
+  xm_until(app2, function() return #log >= 4 end, 25)
+  assert(#log[4].m == 0, "nothing resent after the ack")
+  -- error acks: removed from out, kept as failed with the reason ("" = none)
+  mode = "err"
+  local c2 = T2.send(1, "x")
+  xm_until(app2, function() return net_pending == nil and (storekv.out or "") == "" end, 25, "err ack")
+  p = T2.pending(1)
+  assert(#p == 1 and p[1].cmid == c2 and p[1].err and p[1].reason == "room\tclosed", "err ack kept with reason")
+  mode = "errblank"
+  local c3 = T2.send(2, "y")
+  assert(c3 ~= c2 and c3 ~= cmid, "cmid unique per session")
+  xm_until(app2, function() return net_pending == nil and (storekv.out or "") == "" end, 25, "blank err ack")
+  p = T2.pending(2)
+  assert(#p == 1 and p[1].err and p[1].reason == nil, "empty reason is no reason")
+  -- overflow: out stays <= 1024 bytes, refused with a toast
+  mode = "down"
+  assert(T2.send(1, "") == nil, "empty text refused")
+  local big = ("a"):rep(300)
+  local nt = #toasts
+  local ok_sends = 0
+  for _ = 1, 5 do if T2.send(3, big) then ok_sends = ok_sends + 1 end end
+  assert(ok_sends == 3 and #toasts == nt + 2, "sends accepted " .. ok_sends .. ", toasts " .. (#toasts - nt))
+  assert(#storekv.out <= 1024 and #m_lines(storekv.out) == 3, "out size " .. #storekv.out)
+  local r1, why = T2.send(3, big)
+  assert(r1 == nil and type(why) == "string", "overflow returns nil + reason")
+  print("  outbox persisted, resent once, acked; err/overflow ok")
+end
+
+scenarios.xmpp_bounds = function()
+  xm_world()
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local parts = {}
+  local log = xm_relay(T, function(req, n)
+    if n > 1 then return L("P", req.q) .. L("N", 200, 0) end
+    parts = { L("P", req.q) }
+    for i = 1, 45 do parts[#parts + 1] = L("C", i, "chat", "u" .. i .. "@x.test", "U" .. i, "on", i == 10 and 5 or 0) end
+    for i = 1, 45 do parts[#parts + 1] = L("G", i, i, 1700000000 + i, "u" .. i .. "@x.test", "m" .. i) end
+    for s = 100, 159 do parts[#parts + 1] = L("G", 45, s, 1700000000 + s, "u45@x.test", "n" .. s) end
+    parts[#parts + 1] = L("N", 200, 0)
+    return table.concat(parts)
+  end)
+  xm_open(app)
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4)
+  local cs = T.convs()
+  assert(#cs == 40, "conversations kept: " .. #cs)
+  local have = {}
+  for _, c in ipairs(cs) do have[c.id] = true end
+  for i = 1, 5 do assert(not have[i], "least recent conversation " .. i .. " must be dropped") end
+  assert(cs[1].id == 10 and cs[2].id == 45 and cs[3].id == 44, "order: unread first, then most recent")
+  local ms = T.msgs(45)
+  assert(#ms == 50 and ms[1].seq == 110 and ms[50].seq == 159, "50 newest messages kept: " .. #ms)
+  print(string.format("  bounds ok; %d-byte reply processed in ~%d instructions", #table.concat(parts), XM.cb))
+  -- the relay's 6000-byte fixture (q = 7) in one callback
+  xm_world()
+  app = load_app()
+  T = app._t
+  xm_configured_store(T)
+  storekv.qb = "7"
+  local plain = repo_file("scripts/xmpp-relay/reply_fixture.txt")
+  log = xm_relay(T, function(req) return req.q == 7 and plain or (L("P", req.q) .. L("N", 110, 0)) end)
+  xm_open(app)
+  xm_until(app, function() return #log >= 1 and net_pending == nil end, 4)
+  assert(T.header() == "Online" and #T.convs() == 8, "fixture applied: " .. #T.convs() .. " convs, " .. tostring(T.header()))
+  print(string.format("  6000-byte fixture reply processed in ~%d instructions (budget %d)", XM.cb, BUDGET))
+  assert(XM.cb < BUDGET)
+end
+
 -- True (and says so) when this app has no scenarios of its own. Returning a
 -- truthy value makes the dispatch below pick an EMPTY list rather than running
 -- someone else's tests against it.
@@ -2394,7 +2881,8 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   or APP_PATH:find("/protreck/", 1, true)
   and { "protreck_tdeck", "protreck_v4", "protreck_no_gps", "protreck_chrono", "protreck_timer", "protreck_alti", "protreck_cost" }
   or APP_PATH:find("/xmpp/", 1, true)
-  and { "harness_crypto", "xmpp_seal_vectors", "xmpp_kdf_budget" }
+  and { "harness_crypto", "xmpp_seal_vectors", "xmpp_kdf_budget", "xmpp_setup", "xmpp_sync", "xmpp_failures",
+        "xmpp_relay_reset", "xmpp_outbox", "xmpp_bounds" }
   or APP_PATH:find("/ping/", 1, true)
   and { "ping_tdeck", "ping_v4", "ping_no_contacts", "ping_round_trip", "ping_auto_reply", "ping_cost" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no

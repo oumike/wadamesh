@@ -1,6 +1,7 @@
 -- XMPP chat through a wadamesh relay (scripts/xmpp-relay).
 -- Protocol: docs/superpowers/specs/2026-10-16-xmpp-app-design.md, section 2.
--- Sections: seal, codec. Nothing here runs at load time beyond defining functions.
+-- Sections: seal, codec, sync (setup, poll loop, outbox), app callbacks.
+-- Nothing here runs at load time beyond defining functions.
 
 local app = {}
 
@@ -197,12 +198,422 @@ local function parse_reply(plain)
   return r
 end
 
--- internal, for scripts/lua-harness
+-- ---------------------------------------------------------------- sync
+-- One sealed POST <url>/w at a time. Poll every 5 s, back off to 30 s after six
+-- failures, re-sync at once on `more = 1`, on a send and after a relay reset.
+-- Store writes: setup, the qb reservation (open + every 1000 requests), and the
+-- outbox on a user send / ack. Never per sync.
+
+local POLL_MS, BACKOFF_MS, BACKOFF_AFTER = 5000, 30000, 6
+local CORRUPT_AFTER = 3                -- bad replies in a row before the header says so
+local QBLOCK = 1000                    -- q numbers reserved per qb write
+local OUT_MAX = 1024                   -- bytes of escaped M lines kept in store "out"
+local MAX_MSGS, MAX_CONVS, MAX_FAILED = 50, 40, 10
+local KDF_ITERS = 400                  -- PBKDF2 rounds per tick (~53k instructions)
+local MAX_REPLY = 8192
+local CTYPE = "application/octet-stream"
+
+local HEADERS = {
+  online = "Online",
+  unreachable = "Relay unreachable",
+  xmpp_offline = "Relay offline from XMPP",
+  denied = "Passphrase rejected — check Settings",
+}
+local CORRUPTED = "Relay reply corrupted"
+local POLLING = { online = true, unreachable = true, xmpp_offline = true }
+
+local S = {
+  state = "setup",
+  gen = 0,          -- bumped on setup / reset: a reply for an older session is ignored
+  convs = {}, nconv = 0,
+  outbox = {},      -- { {conv, cmid, text}, ... } oldest first, mirrors store "out"
+  cmids = {},       -- cmids used this session
+  reads = {},       -- conv -> seq still to report with an R line
+  failed = {},      -- conv -> { {cmid, text, err = true, reason}, ... }
+  rev = 0,          -- bumped whenever anything a screen shows changes
+  fails = 0, bad = 0, cursor = 0, next_at = 0,
+}
+
+local function changed() S.rev = S.rev + 1 end
+local function now() return wada.sys.millis() end
+local function sget(k)
+  local v = wada.store.get(k)
+  if v == nil or v == "" then return nil end
+  return tostring(v)
+end
+
+local function rhex(words)
+  local r = wada.sys.random
+  local t = {}
+  for i = 1, words do t[i] = spack(">i4", r()) end
+  return wada.crypto.hex(concat(t))
+end
+
+local function unhex(h)
+  if type(h) ~= "string" or #h ~= 64 or h:find("[^0-9a-f]") then return nil end
+  return (h:gsub("..", function(x) return schar(tonumber(x, 16)) end))
+end
+
+local function clear_view()
+  S.convs, S.nconv, S.cursor = {}, 0, 0
+  changed()
+end
+
+-- ---- outbox (store "out": escaped M lines joined by "\n")
+local function out_line(m) return "M\t" .. m.conv .. "\t" .. m.cmid .. "\t" .. esc(m.text) end
+
+local function out_string(list)
+  local t = {}
+  for i, m in ipairs(list) do t[i] = out_line(m) end
+  return concat(t, "\n")
+end
+
+local function load_outbox()
+  S.outbox = {}
+  local s = sget("out")
+  if not s then return end
+  for line in (s .. "\n"):gmatch("([^\n]*)\n") do
+    local f = fields(line)
+    local conv = tonumber(f[2])
+    if f[1] == "M" and conv and f[3] and f[3] ~= "" and f[4] then
+      S.outbox[#S.outbox + 1] = { conv = conv, cmid = f[3], text = unesc(f[4]) }
+      S.cmids[f[3]] = true
+    end
+  end
+end
+
+local function new_cmid()
+  local c
+  repeat c = rhex(1) until not S.cmids[c]
+  S.cmids[c] = true
+  return c
+end
+
+-- ---- session
+local function reserve_q()
+  S.qlim = S.q + QBLOCK
+  wada.store.set("qb", tostring(S.qlim))
+end
+
+local function start_session(url, ek, mk, sid)
+  S.url, S.ek, S.mk, S.sid = url .. "/w", ek, mk, sid
+  S.gen = S.gen + 1
+  S.q = math.tointeger(tonumber(sget("qb") or "0")) or 0
+  reserve_q()
+  S.fails, S.bad, S.next_at = 0, 0, 0
+  S.reads = {}
+  clear_view()
+  S.state = "online"
+  changed()
+end
+
+local function load_config()
+  local url, sid = sget("url"), sget("sid")
+  local ek, mk = unhex(sget("ek")), unhex(sget("mk"))
+  if url and sid and ek and mk then
+    start_session(url, ek, mk, sid)
+    return true
+  end
+  return false
+end
+
+local function finish_setup(url, st)
+  local sid = sget("sid")
+  if not sid or not sid:match("^[0-9a-f]+$") or #sid ~= 16 then sid = rhex(2) end
+  local hex = wada.crypto.hex
+  wada.store.set("url", url)
+  wada.store.set("ek", hex(st.enc))
+  wada.store.set("mk", hex(st.mac))
+  wada.store.set("sid", sid)
+  start_session(url, st.enc, st.mac, sid)
+end
+
+-- Prompts "Relay URL" then "Passphrase". Cancel at either step changes nothing.
+local function setup()
+  if S.prompting then return end
+  S.prompting = true
+  wada.ui.input("Relay URL", sget("url") or "http://", function(u)
+    if not u then S.prompting = false; return end
+    u = u:match("^%s*(.-)%s*$")
+    if ssub(u, -1) == "/" then u = ssub(u, 1, -2) end
+    if not u:match("^http://[^%s/][^%s]*$") or #u > 200 then
+      S.prompting = false
+      wada.sys.toast("Relay URL must look like http://host:port")
+      return
+    end
+    wada.ui.input("Passphrase", "", function(pw)
+      S.prompting = false
+      if not pw or pw == "" then return end
+      S.gen = S.gen + 1          -- stop the old session; its in-flight reply is ignored
+      S.kdf, S.kdf_url = kdf_new(pw), u
+      S.state = "deriving"
+      changed()
+    end)
+  end)
+end
+
+-- Forget keys, cursor and pending sends; the next setup makes a new sid.
+local function reset()
+  for _, k in ipairs({ "url", "ek", "mk", "sid", "qb", "out" }) do wada.store.set(k, "") end
+  S.gen = S.gen + 1
+  S.kdf, S.url, S.ek, S.mk, S.sid = nil, nil, nil, nil, nil
+  S.outbox, S.failed, S.reads = {}, {}, {}
+  clear_view()
+  S.state = "setup"
+  changed()
+end
+
+-- ---- applying a reply
+local function evict_convs()
+  local list = {}
+  for _, c in pairs(S.convs) do list[#list + 1] = c end
+  table.sort(list, function(a, b)
+    if a.act ~= b.act then return a.act > b.act end
+    return a.id > b.id
+  end)
+  for i = MAX_CONVS + 1, #list do S.convs[list[i].id] = nil end
+  S.nconv = MAX_CONVS
+end
+
+local function apply_view(r)
+  local convs = S.convs
+  for _, c in ipairs(r.convs) do
+    if c.id and c.unread then
+      local cv = convs[c.id]
+      if not cv then
+        cv = { id = c.id, msgs = {}, seq = 0, act = 0 }
+        convs[c.id] = cv
+        S.nconv = S.nconv + 1
+      end
+      cv.kind, cv.jid, cv.name, cv.presence, cv.unread = c.kind, c.jid, c.name, c.presence, c.unread
+    end
+  end
+  for _, m in ipairs(r.msgs) do
+    local cv = m.conv and m.seq and m.ts and convs[m.conv]
+    if cv and m.seq > cv.seq then
+      local t = cv.msgs
+      t[#t + 1] = { seq = m.seq, ts = m.ts, sender = m.sender, text = m.text }
+      if #t > MAX_MSGS then table.remove(t, 1) end
+      cv.seq, cv.act = m.seq, m.seq
+    end
+  end
+  if S.nconv > MAX_CONVS then evict_convs() end
+end
+
+local function apply_acks(acks)
+  local hit = false
+  for _, a in ipairs(acks) do
+    local ob = S.outbox
+    for i = 1, #ob do
+      local m = ob[i]
+      if m.cmid == a.cmid then
+        table.remove(ob, i)
+        hit = true
+        if not a.ok then
+          local f = S.failed[m.conv] or {}
+          S.failed[m.conv] = f
+          f[#f + 1] = { cmid = m.cmid, text = m.text, err = true,
+                        reason = (a.reason and a.reason ~= "") and a.reason or nil }
+          if #f > MAX_FAILED then table.remove(f, 1) end
+        end
+        break
+      end
+    end
+  end
+  if hit then
+    wada.store.set("out", out_string(S.outbox))
+    changed()
+  end
+end
+
+-- network failure (corrupt = false) or a reply that failed tag / parse / q (true)
+local function failed(t, corrupt)
+  S.fails = S.fails + 1
+  S.bad = corrupt and S.bad + 1 or 0
+  S.state = "unreachable"
+  S.next_at = t + (S.fails >= BACKOFF_AFTER and BACKOFF_MS or POLL_MS)
+  changed()
+end
+
+local function on_reply(req, status, body)
+  S.inflight = nil
+  if req.gen ~= S.gen then return end
+  local t = now()
+  if status ~= 200 or type(body) ~= "string" then return failed(t, false) end
+  if body == "DENIED" then
+    S.state = "denied"
+    changed()
+    return
+  end
+  local plain = open(S.ek, S.mk, "P", body)
+  local r = plain and parse_reply(plain)
+  if not r or r.q ~= req.q then return failed(t, true) end
+  S.fails, S.bad = 0, 0
+  S.state = r.offline and "xmpp_offline" or "online"
+  apply_acks(r.acks)
+  for _, rd in ipairs(req.reads) do
+    local s = S.reads[rd.conv]
+    if s and s <= rd.seq then S.reads[rd.conv] = nil end
+  end
+  if req.cursor > 0 and r.cursor < req.cursor then
+    clear_view()           -- relay database lost or replaced: resync from 0 now
+    S.reads = {}           -- their seqs belong to the lost revision
+    S.next_at = t
+  else
+    apply_view(r)
+    S.cursor = r.cursor
+    S.next_at = r.more and t or t + POLL_MS
+  end
+  changed()
+end
+
+local function sync(t)
+  if S.q >= S.qlim then reserve_q() end
+  local q = S.q
+  S.q = q + 1
+  local reads = {}
+  for conv, seq in pairs(S.reads) do reads[#reads + 1] = { conv = conv, seq = seq } end
+  local plain = build_request(S.sid, q, S.cursor, S.outbox, reads)
+  local req = { q = q, cursor = S.cursor, reads = reads, gen = S.gen }
+  local ok = pcall(wada.net.http_post, S.url, seal(S.ek, S.mk, "Q", nonce(), plain), CTYPE,
+                   function(st, b) on_reply(req, st, b) end, MAX_REPLY)
+  if ok then
+    S.inflight = req
+  else
+    S.next_at = t + POLL_MS        -- net worker refused: try again later
+  end
+end
+
+local function step()
+  if S.state == "deriving" then
+    if kdf_step(S.kdf, KDF_ITERS) then
+      local st, url = S.kdf, S.kdf_url
+      S.kdf, S.kdf_url = nil, nil
+      finish_setup(url, st)
+    end
+    return
+  end
+  if POLLING[S.state] and not S.inflight then
+    local t = now()
+    if t >= S.next_at then sync(t) end
+  end
+end
+
+-- ---- data API for the screens
+-- queue text for conv; returns cmid, or nil + reason (toast on a full outbox)
+local function send(conv, text)
+  conv = math.tointeger(conv)
+  if not conv or type(text) ~= "string" then return nil, "bad arguments" end
+  text = cut_utf8(text:gsub("\r", ""), MAX_SEND_BYTES)
+  if text:match("^%s*$") then return nil, "empty" end
+  if not S.sid then return nil, "not set up" end
+  local m = { conv = conv, text = text }
+  m.cmid = new_cmid()
+  local cur = out_string(S.outbox)
+  local s = (cur ~= "" and (cur .. "\n") or "") .. out_line(m)
+  if #s > OUT_MAX then
+    wada.sys.toast("Too many unsent messages — wait for the relay")
+    return nil, "outbox full"
+  end
+  S.outbox[#S.outbox + 1] = m
+  wada.store.set("out", s)
+  if POLLING[S.state] then S.next_at = 0 end
+  changed()
+  return m.cmid
+end
+
+local function by_activity(a, b)
+  local ua, ub = (a.unread or 0) > 0, (b.unread or 0) > 0
+  if ua ~= ub then return ua end
+  if a.act ~= b.act then return a.act > b.act end
+  return a.id < b.id
+end
+
+-- conversation tables {id, kind, jid, name, presence, unread}: unread first, then latest
+local function convs()
+  local list = {}
+  for _, c in pairs(S.convs) do list[#list + 1] = c end
+  table.sort(list, by_activity)
+  return list
+end
+
+-- {seq, ts, sender, text} ascending; sender "" = own message
+local function msgs(conv)
+  local cv = S.convs[conv]
+  return cv and cv.msgs or {}
+end
+
+-- sends not yet confirmed ({cmid, text, err = false}) and failed ones ({..., err = true, reason})
+local function pending(conv)
+  local list = {}
+  for _, f in ipairs(S.failed[conv] or {}) do list[#list + 1] = f end
+  for _, m in ipairs(S.outbox) do
+    if m.conv == conv then list[#list + 1] = { cmid = m.cmid, text = m.text, err = false } end
+  end
+  return list
+end
+
+local function mark_read(conv)
+  local cv = S.convs[conv]
+  if not cv then return end
+  cv.unread = 0
+  if cv.seq > 0 then S.reads[conv] = cv.seq end
+  changed()
+end
+
+local function header()
+  local st = S.state
+  if st == "setup" or st == "deriving" then return nil end
+  if S.bad >= CORRUPT_AFTER then return CORRUPTED end
+  return HEADERS[st]
+end
+
+-- ---------------------------------------------------------------- app
+-- Minimal screen: a status line and, until set up, a setup button. The list,
+-- chat and settings screens are built on the app._t data API below.
+local ui = {}
+
+local function status_text()
+  return header() or (S.state == "deriving" and "Deriving keys…" or "Not set up")
+end
+
+function app.on_open(w, h)
+  S.cmids, S.failed, S.prompting = {}, {}, false
+  load_outbox()
+  ui.status = wada.ui.label(status_text(), 6, 4, 14, wada.ui.colors.text)
+  ui.shown = status_text()
+  if not load_config() then
+    S.state = "setup"
+    ui.setup = wada.ui.button("Set up relay", 6, 28, 140, 32, setup)
+    setup()
+  end
+  wada.timer.every(250)
+end
+
+function app.on_tick()
+  step()
+  local s = status_text()
+  if s ~= ui.shown then
+    ui.shown = s
+    ui.status:set(s)
+  end
+end
+
+function app.on_close()
+  S.gen = S.gen + 1
+end
+
+-- internal, for scripts/lua-harness; also the data API for the screens
 app._t = {
   kdf_new = kdf_new, kdf_step = kdf_step,
   seal = seal, open = open, nonce = nonce,
   esc = esc, unesc = unesc, cut_utf8 = cut_utf8, fields = fields,
   build_request = build_request, parse_reply = parse_reply,
+  setup = setup, reset = reset, send = send,
+  convs = convs, msgs = msgs, pending = pending, mark_read = mark_read,
+  state = function() return S.state end,
+  header = header,
+  rev = function() return S.rev end,
 }
 
 return app
