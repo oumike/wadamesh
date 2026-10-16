@@ -1,7 +1,7 @@
 # XMPP chat app + relay — design
 
 Issue: [#678](https://github.com/ALLFATHER-BV/wadamesh/issues/678) (Internet messaging).
-Status: design approved in conversation (parts 1–2); parts 3–5 below await review.
+Status: design approved in conversation (parts 1–2); parts 3–5 under review.
 
 ## Goal
 
@@ -194,12 +194,16 @@ N <cursor> <more:0|1>
   Conversations to send/receive 1:1 and in a test room on
   `conference.xmpp.sumat.org`. Device test on T-Deck first, then a small screen
   (M9 or Wio Tracker L2) and Heltec V4 for the memory floor.
-- **Exposure:** how the relay port is reached from outside donut (a new port
-  forward, or an nginx-proxy-manager host) is decided at deployment time; the
-  app only needs an `http://` URL.
+- **Exposure:** for development, an nginx-proxy-manager proxy host on donut
+  forwards plain HTTP to the relay container. This hosting is temporary, so
+  nothing is tied to it: the relay's `listen` address and every account and
+  passphrase setting live in `relay.ini`, the app takes the relay URL from its
+  Setup screen, and neither side hard-codes `sumat.org` or donut. Moving the
+  relay is a config change, not a code change.
 
 ## Open items
 
-- Test accounts on `xmpp.sumat.org` (registration is off; created with
-  `prosodyctl` by the owner).
-- Relay port exposure on donut (see above).
+- Test accounts `wadatest1@xmpp.sumat.org` and `wadatest2@xmpp.sumat.org`
+  exist; passwords are in `~/Projects/xmpp/wada-test-accounts.txt` on donut
+  (mode 600), not in this repo.
+- The NPM proxy host name and port are chosen when the relay is first deployed.
