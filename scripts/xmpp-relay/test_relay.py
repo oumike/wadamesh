@@ -190,13 +190,21 @@ class SyncTests(unittest.TestCase):
         ls = _lines(reply)
         per = Counter(int(l[1]) for l in ls if l[0] == "G")
         self.assertGreater(len(per), 0)
-        if max(per.values()) > 1:
-            self.assertEqual(len(per), 40)
         self.assertEqual(max(per.values()), 1)
         for l in ls:
             if l[0] == "G":
                 self.assertTrue(l[5].startswith("009"))  # newest message
         self.assertEqual(ls[-1][2], "0")
+
+    def test_initial_budget_favours_recent_conversation(self):
+        h, x, sh, ids = _handler(convs=40, msgs=10, size=200)
+        h.add_message(ids[-1], "fresh", 9999, "c39@x", "FRESH")
+        ls = _lines(sh.handle("S\ts\t1\t0\n"))
+        gs = [l for l in ls if l[0] == "G"]
+        self.assertLess(len(gs), 40)
+        self.assertIn((str(ids[-1]), "FRESH"), [(l[1], l[5]) for l in gs])
+        seqs = [int(l[2]) for l in gs]
+        self.assertEqual(seqs, sorted(seqs))
 
     def test_incremental_paging(self):
         h, x, sh, ids = _handler(convs=1, msgs=1)

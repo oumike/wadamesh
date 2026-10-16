@@ -341,7 +341,10 @@ class SyncHandler:
 
     def _initial(self, room):
         db = self.h.db
-        convs = [r[0] for r in db.execute("SELECT id FROM conversations ORDER BY id")]
+        convs = [r[0] for r in db.execute(
+            "SELECT c.id FROM conversations c LEFT JOIN "
+            "(SELECT conv, MAX(seq) m FROM messages GROUP BY conv) x ON x.conv = c.id "
+            "ORDER BY COALESCE(x.m, 0) DESC, c.id")]
         per = {}
         for c in convs:
             per[c] = db.execute(
