@@ -339,7 +339,7 @@ local function build_wada()
     assert(type(cb) == "function", "http_post: callback must be a function")
     if maxr ~= nil then checkint(maxr, "http_post max_reply") end
     assert(url:sub(1, 7) == "http://", "http:// urls only")
-    assert(#url < 256, "url too long")
+    assert(#url < 160, "url too long")   -- s_net_url[160]
     assert(#body > 0 and #body <= 64 * 1024, "bad body length")
     assert(not net_pending, "a fetch is already running")
     net_log[#net_log + 1] = { url = url, body = body, ctype = ctype }
@@ -2511,6 +2511,20 @@ scenarios.xmpp_setup = function()
   T.setup()
   xm_tick(app, 3)
   assert(T.state() == "setup" and next(storekv) == nil and #toasts > 0, "https:// URL must be refused")
+  -- url .. "/w" must fit the host's 160-byte URL buffer: 158 chars refused, 157 accepted
+  local long = "http://" .. ("h"):rep(151)
+  assert(#long == 158)
+  local nt = #toasts
+  cfg.inputs = { long }
+  T.setup()
+  xm_tick(app, 3)
+  assert(T.state() == "setup" and next(storekv) == nil and #toasts == nt + 1, "158-char URL must be refused")
+  cfg.inputs = { long:sub(1, 157), false }
+  T.setup()
+  xm_tick(app, 1)
+  assert(input_pending and input_pending.title == "Passphrase", "157-char URL must be accepted")
+  xm_tick(app, 2)
+  assert(T.state() == "setup" and next(storekv) == nil, "cancelled passphrase stores nothing")
   -- real setup, URL with a trailing slash
   cfg.inputs = { XM_URL .. "/", "pw" }
   T.setup()
@@ -2704,6 +2718,37 @@ scenarios.xmpp_failures = function()
   print("  backoff, DENIED, corrupted, wrong q and xmpp-offline ok")
 end
 
+-- http_post itself raising: the busy error just waits, anything else is a failure
+scenarios.xmpp_post_raises = function()
+  xm_world()
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  local calls, err = {}, "no memory for the reply buffer"
+  wada.net.http_post = function() calls[#calls + 1] = clock_ms; error(err) end
+  xm_open(app)
+  xm_until(app, function() return #calls >= 6 end, 6 * 25, "six raising posts")
+  for i = 2, 6 do
+    local gap = calls[i] - calls[i - 1]
+    assert(gap >= 5000 and gap <= 5500, "retry gap " .. i .. ": " .. gap)
+  end
+  assert(T.state() == "unreachable" and T.header() == "Relay unreachable", "header " .. tostring(T.header()))
+  xm_until(app, function() return #calls >= 7 end, 32000 // 250, "seventh post")
+  assert(calls[7] - calls[6] >= 30000, "backoff gap " .. (calls[7] - calls[6]))
+  -- busy: not a failure, state untouched
+  xm_world()
+  app = load_app()
+  T = app._t
+  xm_configured_store(T)
+  calls, err = {}, "a fetch is already running"
+  wada.net.http_post = function() calls[#calls + 1] = clock_ms; error(err) end
+  xm_open(app)
+  xm_until(app, function() return #calls >= 8 end, 8 * 25, "busy posts")
+  assert(T.state() == "online" and T.header() == "Online", "busy must not count as a failure: " .. tostring(T.header()))
+  assert(calls[8] - calls[7] <= 5500, "no backoff while busy")
+  print("  raising http_post: backoff + unreachable; busy: retried, still online")
+end
+
 scenarios.xmpp_relay_reset = function()
   xm_world()
   local app = load_app()
@@ -2882,7 +2927,7 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   and { "protreck_tdeck", "protreck_v4", "protreck_no_gps", "protreck_chrono", "protreck_timer", "protreck_alti", "protreck_cost" }
   or APP_PATH:find("/xmpp/", 1, true)
   and { "harness_crypto", "xmpp_seal_vectors", "xmpp_kdf_budget", "xmpp_setup", "xmpp_sync", "xmpp_failures",
-        "xmpp_relay_reset", "xmpp_outbox", "xmpp_bounds" }
+        "xmpp_post_raises", "xmpp_relay_reset", "xmpp_outbox", "xmpp_bounds" }
   or APP_PATH:find("/ping/", 1, true)
   and { "ping_tdeck", "ping_v4", "ping_no_contacts", "ping_round_trip", "ping_auto_reply", "ping_cost" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no

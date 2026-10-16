@@ -209,9 +209,10 @@ local CORRUPT_AFTER = 3                -- bad replies in a row before the header
 local QBLOCK = 1000                    -- q numbers reserved per qb write
 local OUT_MAX = 1024                   -- bytes of escaped M lines kept in store "out"
 local MAX_MSGS, MAX_CONVS, MAX_FAILED = 50, 40, 10
-local KDF_ITERS = 400                  -- PBKDF2 rounds per tick (~53k instructions)
+local KDF_ITERS = 400                  -- PBKDF2 rounds per tick (~57k instructions measured)
 local MAX_REPLY = 8192
 local CTYPE = "application/octet-stream"
+local URL_MAX = 157                     -- url .. "/w" must fit the host's 160-byte s_net_url
 
 local HEADERS = {
   online = "Online",
@@ -336,9 +337,9 @@ local function setup()
     if not u then S.prompting = false; return end
     u = u:match("^%s*(.-)%s*$")
     if ssub(u, -1) == "/" then u = ssub(u, 1, -2) end
-    if not u:match("^http://[^%s/][^%s]*$") or #u > 200 then
+    if not u:match("^http://[^%s/][^%s]*$") or #u > URL_MAX then
       S.prompting = false
-      wada.sys.toast("Relay URL must look like http://host:port")
+      wada.sys.toast(#u > URL_MAX and "Relay URL too long" or "Relay URL must look like http://host:port")
       return
     end
     wada.ui.input("Passphrase", "", function(pw)
@@ -475,12 +476,14 @@ local function sync(t)
   for conv, seq in pairs(S.reads) do reads[#reads + 1] = { conv = conv, seq = seq } end
   local plain = build_request(S.sid, q, S.cursor, S.outbox, reads)
   local req = { q = q, cursor = S.cursor, reads = reads, gen = S.gen }
-  local ok = pcall(wada.net.http_post, S.url, seal(S.ek, S.mk, "Q", nonce(), plain), CTYPE,
-                   function(st, b) on_reply(req, st, b) end, MAX_REPLY)
+  local ok, err = pcall(wada.net.http_post, S.url, seal(S.ek, S.mk, "Q", nonce(), plain), CTYPE,
+                        function(st, b) on_reply(req, st, b) end, MAX_REPLY)
   if ok then
     S.inflight = req
+  elseif tostring(err):find("already running", 1, true) then
+    S.next_at = t + POLL_MS        -- net worker busy: try again later
   else
-    S.next_at = t + POLL_MS        -- net worker refused: try again later
+    failed(t, false)               -- e.g. "url too long", "no memory for the reply buffer"
   end
 end
 
