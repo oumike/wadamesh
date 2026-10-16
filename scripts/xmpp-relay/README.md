@@ -67,8 +67,8 @@ OMEMO/OTR, private messages inside rooms, more than one account per relay.
    `session started as ...`, `roster has N contacts`, `joined N rooms`.
    The password and passphrase are never logged.
 
-3. In the app's Setup screen, enter the relay URL (`http://host:port/w`) and
-   the same passphrase.
+3. In the app's Setup screen, enter the relay URL (`http://host:port`, the
+   app adds `/w` itself; at most 157 characters) and the same passphrase.
 
 ## Exposing it to the device
 
