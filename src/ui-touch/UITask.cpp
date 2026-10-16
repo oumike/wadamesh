@@ -68204,6 +68204,11 @@ void luaHostToast(const char* msg, int ms) {
   if (g_lv.task) g_lv.task->showAlert(msg, ms);
 }
 fs::FS* luaHostAppFs() { return uiDataFsReady() ? s_ui_data_fs : nullptr; }
+// wada.sys.caps().fs_sd: the app filesystem above really is the SD card. caps.sd
+// is only CAP_SD (the board has a slot); several CAP_SD boards fall back to
+// internal flash when no card was there at first resolve, and an app that logs
+// "to the card" must not wear the flash instead.
+bool luaHostAppFsIsSd() { return uiDataFsIsSdCard(); }
 void luaHostAppPath(char* out, size_t cap, const char* rel) {
   snprintf(out, cap, "%s%s", s_ui_data_root, rel);   // SD-rooted stores prefix /meshcomod
 }

@@ -41,6 +41,7 @@ extern void             luaHostMarkInert(lv_obj_t* obj);          // never a key
 extern bool             luaHostScreenOn();   // false = display asleep; app ticks pause
 extern void             luaHostKeepAwake(bool on);   // hold the screen + ticks for a measuring app                            // notification chime; false = no sounder / muted
 extern fs::FS*          luaHostAppFs();                           // /apps storage root FS (may be null)
+extern bool             luaHostAppFsIsSd();                       // that FS is the SD card, not internal flash
 extern void             luaHostAppPath(char* out, size_t cap, const char* rel);   // prefixes the store root
 #if CAP_LUA_AUDIO
 extern bool             luaHostAudioPlay(fs::FS* fs, const char* path, const char* shown,
@@ -1018,6 +1019,7 @@ int sysCaps(lua_State* L) {
   lua_pushboolean(L, CAP_KEYBOARD);     lua_setfield(L, -2, "keyboard");
   lua_pushboolean(L, CAP_TOUCH);        lua_setfield(L, -2, "touch");
   lua_pushboolean(L, CAP_SD);           lua_setfield(L, -2, "sd");
+  lua_pushboolean(L, luaHostAppFsIsSd()); lua_setfield(L, -2, "fs_sd");  // wada.fs is on the SD card right now
   lua_pushboolean(L, CAP_LUA_SD_READ);  lua_setfield(L, -2, "sd_list");
   lua_pushboolean(L, CAP_LUA_SD_LIST);  lua_setfield(L, -2, "sd_clean");   // wada.sd.check/remove + list paging
   lua_pushboolean(L, CAP_LUA_AUDIO);    lua_setfield(L, -2, "audio");

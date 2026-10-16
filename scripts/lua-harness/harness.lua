@@ -304,7 +304,8 @@ local function build_wada()
   wada.sys.datetime = function() return nil end
   wada.sys.beep = function() return false end
   wada.sys.caps = function() return { sdk_ext = cfg.caps.sdk_ext, keyboard = cfg.caps.keyboard,
-                                       touch = cfg.caps.touch, sd = true, compass = cfg.caps.compass,
+                                       touch = cfg.caps.touch, sd = true, fs_sd = cfg.caps.fs_sd or false,
+                                       compass = cfg.caps.compass,
                                        accel = cfg.caps.accel, discover = cfg.caps.discover,
                                        sd_list = cfg.caps.sd_list or false,
                                        sd_clean = cfg.caps.sd_clean or false,
@@ -3204,7 +3205,7 @@ end
 
 -- ThinkNode M9: 320x196, keyboard/trackball, no touch
 scenarios.xmpp_m9 = function()
-  xm_ui_world(320, 196, { touch = false, keyboard = true, sdk_ext = true })
+  xm_ui_world(320, 196, { touch = false, keyboard = true, sdk_ext = true, fs_sd = true })
   local app = load_app()
   local T = app._t
   xm_configured_store(T)
@@ -3361,9 +3362,21 @@ scenarios.xmpp_cost = function()
 end
 
 -- ---- xmpp: SD history (Task 8) ----------------------------------------------
--- every wada.fs write / append the app makes: { at, name, mode, ok, err }
+-- the history file stem for a jid, computed here from the spec's formula:
+-- "h" .. hex(HMAC-SHA256(mac key, relay url LF jid)):sub(1, 10)
+local function xm_hname(T, jid, url)
+  local _, m = xm_keys(T)
+  return "h" .. wada.crypto.hex(wada.crypto.hmac_sha256(m, (url or XM_URL) .. "\n" .. jid)):sub(1, 10)
+end
+
+-- every wada.fs write / append / remove the app makes: { at, name, mode, ok, err }
 local function xm_fs_log()
   local log = {}
+  local rm = wada.fs.remove
+  wada.fs.remove = function(name)
+    log[#log + 1] = { at = clock_ms, name = name, mode = "remove", ok = true, n = 0 }
+    return rm(name)
+  end
   for _, mode in ipairs({ "write", "append" }) do
     local f = wada.fs[mode]
     wada.fs[mode] = function(name, data)
@@ -3391,8 +3404,8 @@ local function xm_log_seqs(name, T)
 end
 
 -- one 100-byte message text for seq k (printable, with an escaped tab in it)
-local function xm_text100(k)
-  local s = string.format("msg %05d\t", k)
+local function xm_text100(k, prefix)
+  local s = string.format("%s %05d\t", prefix or "msg", k)
   return s .. ("x"):rep(100 - #s)
 end
 
@@ -3401,19 +3414,23 @@ end
 -- On a new session (cursor 0) it replays the newest `replay` released messages.
 -- Every 50th message is an own one (sender "").
 -- With nconv > 1, message k goes to conv (k % nconv) + 1 instead.
-local function xm_feed_relay(T, total, gap, replay, nconv)
+-- opts: prefix (message text, default "msg"), jid1 (conv 1's jid, default u1@x.test).
+local function xm_feed_relay(T, total, gap, replay, nconv, opts)
   local st = { t0 = clock_ms, sent = 0, total = total }
   nconv = nconv or 1
+  opts = opts or {}
   local log = xm_relay(T, function(req)
     local out = { L("P", req.q) }
-    for c = 1, nconv do out[#out + 1] = L("C", c, "chat", "u" .. c .. "@x.test", c == 1 and "Alice" or "U" .. c, "on", 0) end
+    for c = 1, nconv do
+      out[#out + 1] = L("C", c, "chat", c == 1 and opts.jid1 or "u" .. c .. "@x.test", c == 1 and "Alice" or "U" .. c, "on", 0)
+    end
     local released = math.min(st.total, (clock_ms - st.t0) // gap)
     local from = st.sent + 1
     if req.cursor == 0 then from = math.max(1, released - (replay or 10) + 1) end
     local bytes, k = 0, from
     while k <= released and bytes < 5500 do
       local l = L("G", nconv == 1 and 1 or k % nconv + 1, k, 1700000000 + k, k % 50 == 0 and "" or "alice@x.test",
-                  T.esc(xm_text100(k)))
+                  T.esc(xm_text100(k, opts.prefix)))
       out[#out + 1] = l; bytes = bytes + #l; k = k + 1
     end
     if k - 1 > st.sent then st.sent = k - 1 end
@@ -3424,10 +3441,12 @@ local function xm_feed_relay(T, total, gap, replay, nconv)
 end
 
 scenarios.xmpp_sdlog = function()
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
   local app = load_app()
   local T = app._t
   xm_configured_store(T)
+  local L1, O1 = xm_hname(T, "u1@x.test") .. ".log", xm_hname(T, "u1@x.test") .. ".old"
+  assert(#L1 <= 15 and L1:match("^h%x+%.log$"), "history file name " .. L1)
   storekv.sd = "1"
   local fl = xm_fs_log()
   local st = xm_feed_relay(T, 400, 150, 10)       -- 400 messages over 60 s
@@ -3451,10 +3470,10 @@ scenarios.xmpp_sdlog = function()
       string.format("fs call %d (%s %s) %d ms after the previous", i, fl[i].mode, fl[i].name, fl[i].at - fl[i - 1].at))
   end
   for _, w in ipairs(fl) do assert(w.ok, "fs " .. w.mode .. " " .. w.name .. " failed: " .. tostring(w.err)) end
-  assert(fsfiles["c1.log"] and #fsfiles["c1.log"] <= 30720, "c1.log over 30720 bytes: " .. #(fsfiles["c1.log"] or ""))
-  assert(fsfiles["c1.old"], "c1.log was rotated to c1.old")
+  assert(fsfiles[L1] and #fsfiles[L1] <= 30720, "c1.log over 30720 bytes: " .. #(fsfiles[L1] or ""))
+  assert(fsfiles[O1], "c1.log was rotated to c1.old")
   local seen, n = {}, 0
-  for _, name in ipairs({ "c1.old", "c1.log" }) do
+  for _, name in ipairs({ O1, L1 }) do
     local last = 0
     for _, s in ipairs(xm_log_seqs(name, T)) do
       assert(not seen[s], "seq " .. s .. " logged twice")
@@ -3464,22 +3483,22 @@ scenarios.xmpp_sdlog = function()
   end
   for k = 1, 400 do assert(seen[k], "seq " .. k .. " missing from c1.old + c1.log") end
   -- a log line is <seq> TAB <ts> TAB <esc sender> TAB <esc text>
-  local first = fsfiles["c1.old"]:match("^([^\n]*)\n")
+  local first = fsfiles[O1]:match("^([^\n]*)\n")
   assert(first == "1\t1700000001\talice@x.test\t" .. T.esc(xm_text100(1)), "log line format: " .. first)
-  assert(fsfiles["c1.old"]:find("\n50\t1700000050\t\t" .. T.esc(xm_text100(50)) .. "\n", 1, true),
+  assert(fsfiles[O1]:find("\n50\t1700000050\t\t" .. T.esc(xm_text100(50)) .. "\n", 1, true),
     "own messages (sender \"\") are logged")
-  print(string.format("  400 msgs: %d fs writes, c1.old %d B + c1.log %d B, every seq once",
-    #fl, #fsfiles["c1.old"], #fsfiles["c1.log"]))
+  print(string.format("  400 msgs: %d fs writes, .old %d B + .log %d B, every seq once",
+    #fl, #fsfiles[O1], #fsfiles[L1]))
 
   -- reopen: the relay replays the newest 10 at cursor 0; none is appended again
-  local logbytes, oldbytes = fsfiles["c1.log"], fsfiles["c1.old"]
+  local logbytes, oldbytes = fsfiles[L1], fsfiles[O1]
   app.on_close()
   app = load_app()
   T = app._t
   xm_open(app)
   metered_ticks(4 * 20)
   assert(#T.msgs(1) == 10, "replay of the newest 10 applied, got " .. #T.msgs(1))
-  assert(fsfiles["c1.log"] == logbytes and fsfiles["c1.old"] == oldbytes, "reopen appended duplicates")
+  assert(fsfiles[L1] == logbytes and fsfiles[O1] == oldbytes, "reopen appended duplicates")
 
   -- the chat shows the card's tail before the relay's window
   assert(xm_list(), "conversation list")
@@ -3519,22 +3538,52 @@ end
 
 -- SD history off, "too fast", a failing card, and the buffer bound
 scenarios.xmpp_sdlog_faults = function()
-  -- 1. caps.sd missing: nothing is written even with sd = "1"
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
-  local caps = wada.sys.caps
-  wada.sys.caps = function() local c = caps(); c.sd = false; return c end
-  local app = load_app()
-  local T = app._t
+  -- 1. History is never written to internal flash. caps.sd missing, or caps.sd
+  -- true but fs_sd false / absent (app storage on internal flash, or older
+  -- firmware): the option is hidden and there are zero write / append / remove
+  -- calls, even with sd = "1" left in the store by an earlier session.
+  local app, T, fl, L1
+  for _, case in ipairs({ { what = "no caps.sd", sd = false, fs_sd = true },
+                          { what = "fs_sd false", sd = true, fs_sd = false },
+                          { what = "fs_sd absent", sd = true, fs_sd = nil } }) do
+    xm_ui_world(320, 240, { touch = true, keyboard = false })
+    local caps = wada.sys.caps
+    wada.sys.caps = function() local c = caps(); c.sd, c.fs_sd = case.sd, case.fs_sd; return c end
+    app = load_app()
+    T = app._t
+    xm_configured_store(T)
+    storekv.sd = "1"
+    fl = xm_fs_log()
+    xm_feed_relay(T, 40, 150)
+    xm_open(app)
+    xm_tick(app, 4 * 20)
+    assert(#T.msgs(1) > 0 and #fl == 0, case.what .. ": no fs writes, got " .. #fl)
+    assert(next(fsfiles) == nil, case.what .. ": no files")
+    press("Settings")
+    for _, r in ipairs(xm_rows()) do assert(not r:find("SD card", 1, true), case.what .. ": SD option shown") end
+    assert(not xm_label("Stored unencrypted on the card."), case.what .. ": SD description shown")
+    press("Back")
+  end
+  L1 = xm_hname(T, "u1@x.test") .. ".log"
+  -- a card that goes away while the app is open: Settings hides the option
+  -- and the next toggle cannot switch logging back on
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
+  app = load_app(); T = app._t
   xm_configured_store(T)
-  storekv.sd = "1"
-  local fl = xm_fs_log()
+  storekv.sd = "0"
+  fl = xm_fs_log()
   xm_feed_relay(T, 40, 150)
   xm_open(app)
+  cfg.caps.fs_sd = false
+  press("Settings")
+  for _, r in ipairs(xm_rows()) do assert(not r:find("SD card", 1, true), "card gone: SD option still shown") end
+  press("Back")
+  storekv.sd = "1"                                  -- even if the store says on
   xm_tick(app, 4 * 20)
-  assert(#T.msgs(1) > 0 and #fl == 0, "no caps.sd: no fs writes")
+  assert(#fl == 0, "card gone: no history writes")
 
   -- 2. sd = "0": nothing written; switching it on logs only what comes after
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
   app = load_app(); T = app._t
   xm_configured_store(T)
   storekv.sd = "0"
@@ -3548,20 +3597,20 @@ scenarios.xmpp_sdlog_faults = function()
   assert(storekv.sd == "1", "toggled on")
   press("Back")
   xm_tick(app, 4 * 10)
-  assert(#fl > 0 and fsfiles["c1.log"], "sd on: history written")
-  local firstlogged = xm_log_seqs("c1.log", T)[1]
+  assert(#fl > 0 and fsfiles[L1], "sd on: history written")
+  local firstlogged = xm_log_seqs(L1, T)[1]
   assert(firstlogged > 1, "messages from before the switch are not logged")
   -- switching it off stops writes and leaves the file
   press("Settings")
   xm_pick_text("Keep history on SD card")
   assert(storekv.sd == "0", "toggled off")
   press("Back")
-  local n, keep = #fl, fsfiles["c1.log"]
+  local n, keep = #fl, fsfiles[L1]
   xm_tick(app, 4 * 10)
-  assert(#fl == n and fsfiles["c1.log"] == keep, "sd off: writes stop, the file stays")
+  assert(#fl == n and fsfiles[L1] == keep, "sd off: writes stop, the file stays")
 
   -- 3. "too fast" keeps the buffer: every seq still lands exactly once
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
   app = load_app(); T = app._t
   xm_configured_store(T)
   storekv.sd = "1"
@@ -3577,14 +3626,14 @@ scenarios.xmpp_sdlog_faults = function()
   xm_open(app)
   xm_tick(app, 4 * 30)
   assert(refuse == 0, "too-fast refusals happened")
-  local seqs = xm_log_seqs("c1.log", T)
+  local seqs = xm_log_seqs(L1, T)
   assert(#seqs == 60, "after too fast, all 60 seqs logged once, got " .. #seqs)
   for i, s in ipairs(seqs) do assert(s == i, "seq order after too fast") end
   assert(#toasts == 0, "too fast is not an error")
 
   -- 4. a pulled card: one toast, logging stops, the app keeps syncing
   toasts = {}
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
   app = load_app(); T = app._t
   xm_configured_store(T)
   storekv.sd = "1"
@@ -3604,7 +3653,7 @@ scenarios.xmpp_sdlog_faults = function()
 
   -- 5. the buffer is bounded: a card that always says "too fast"
   toasts = {}
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
   app = load_app(); T = app._t
   xm_configured_store(T)
   storekv.sd = "1"
@@ -3621,7 +3670,7 @@ scenarios.xmpp_sdlog_faults = function()
   local one = sd.pending[1]
 
   -- 6. many busy conversations: all buffers together stay under 48 KB
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
   app = load_app(); T = app._t
   xm_configured_store(T)
   storekv.sd = "1"
@@ -3641,7 +3690,7 @@ scenarios.xmpp_sdlog_faults = function()
 
   -- 7. a session-start burst over 20 conversations (26 KB, nothing on the card
   -- yet) is kept whole and flushed round robin, one call per 2 s
-  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
   app = load_app(); T = app._t
   xm_configured_store(T)
   storekv.sd = "1"
@@ -3652,7 +3701,7 @@ scenarios.xmpp_sdlog_faults = function()
   xm_tick(app, 4 * 60)
   assert(T.sd_stats().drops == 0, "nothing dropped from the burst")
   for c = 1, 20 do
-    local seqs = xm_log_seqs("c" .. c .. ".log", T)
+    local seqs = xm_log_seqs(xm_hname(T, "u" .. c .. "@x.test") .. ".log", T)
     assert(#seqs == 10, "conv " .. c .. ": 10 lines, got " .. #seqs)
     for i, k in ipairs(seqs) do assert(k % 20 + 1 == c and (i == 1 or k > seqs[i - 1]), "conv " .. c .. " seqs") end
   end
@@ -3660,6 +3709,71 @@ scenarios.xmpp_sdlog_faults = function()
   for i = 2, #fl do assert(fl[i].at - fl[i - 1].at >= 2000, "burst flush gap") end
   print(string.format("  no caps.sd, off/on/off, too fast, pulled card, bounds (%d B; 8 convs %d B), 20-conv burst ok",
     one, all))
+end
+
+-- the relay changes under the card: replaced database, other accounts, Reset
+scenarios.xmpp_sdlog_relays = function()
+  xm_ui_world(320, 240, { touch = true, keyboard = false, fs_sd = true })
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  local U1 = xm_hname(T, "u1@x.test")
+  -- session 1: 100 messages (seqs 1..100) from the old relay database
+  local st = xm_feed_relay(T, 100, 50, 10)
+  xm_open(app)
+  xm_tick(app, 4 * 30)
+  assert(#xm_log_seqs(U1 .. ".log", T) == 100, "session 1 logged 100")
+  local gen1 = fsfiles[U1 .. ".log"]
+
+  -- session 2: the relay database was replaced; seqs restart, its cursor (60)
+  -- is below the card's last seq (100). The new messages are logged as a new
+  -- generation and the old lines never show above them.
+  app.on_close()
+  app = load_app(); T = app._t
+  st = xm_feed_relay(T, 60, 1, 60, 1, { prefix = "new" })
+  clock_ms = clock_ms + 1000
+  xm_open(app)
+  xm_tick(app, 4 * 20)
+  assert(st.sent == 60, "new relay delivered 60")
+  assert(fsfiles[U1 .. ".old"] == gen1, "the old generation was rotated to .old")
+  local seqs = xm_log_seqs(U1 .. ".log", T)
+  assert(#seqs == 60 and seqs[1] == 1 and seqs[60] == 60, "new generation logged 1..60, got " .. #seqs)
+  assert(not fsfiles[U1 .. ".log"]:find("msg ", 1, true), "no old-generation line in the new .log")
+  xm_pick(1)
+  local rows = xm_rows()
+  assert(#rows == 60, "chat: 50 from RAM + 10 from the card, got " .. #rows)
+  for i, r in ipairs(rows) do
+    local k = tonumber(r:match("^>? ?new (%d+)\t"))
+    assert(k == i, "row " .. i .. " must be new-generation message " .. i .. ": " .. r)
+  end
+  press("Back")
+
+  -- session 3: another relay whose conv 1 is a different person: another file
+  app.on_close()
+  app = load_app(); T = app._t
+  st = xm_feed_relay(T, 20, 1, 20, 1, { prefix = "zed", jid1 = "zed@y.test" })
+  clock_ms = clock_ms + 1000
+  xm_open(app)
+  xm_tick(app, 4 * 20)
+  local Z = xm_hname(T, "zed@y.test")
+  assert(Z ~= U1, "different jids, different files")
+  assert(#xm_log_seqs(Z .. ".log", T) == 20 and fsfiles[Z .. ".log"]:find("zed 00001", 1, true), "zed logged in its own file")
+  assert(#xm_log_seqs(U1 .. ".log", T) == 60, "u1's file untouched by zed")
+  -- and the same jid on another relay url is yet another file
+  assert(xm_hname(T, "u1@x.test", "http://other.test:8765") ~= U1, "url is part of the name")
+  for _, f in ipairs(wada.fs.list()) do assert(#f.name <= 15, "file name too long: " .. f.name) end
+
+  -- Settings > Reset forgets every conversation's history state
+  wada.fs.append = function() return false, "too fast" end
+  wada.fs.write = function() return false, "too fast" end
+  st.total = 40
+  xm_tick(app, 4 * 10)
+  local p = T.sd_stats().pending
+  assert(p[1] and p[1] > 0, "buffered while the card refuses")
+  T.reset()
+  assert(next(T.sd_stats().pending) == nil, "Reset clears the history state")
+  print("  replaced relay -> new generation, rows by seq; other jid -> other file; Reset clears")
 end
 
 -- True (and says so) when this app has no scenarios of its own. Returning a
@@ -3687,7 +3801,7 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   and { "harness_crypto", "xmpp_seal_vectors", "xmpp_kdf_budget", "xmpp_setup", "xmpp_sync", "xmpp_failures",
         "xmpp_post_raises", "xmpp_relay_reset", "xmpp_outbox", "xmpp_bounds",
         "xmpp_chat", "xmpp_empty", "xmpp_v4", "xmpp_m9", "xmpp_cost",
-        "xmpp_sdlog", "xmpp_sdlog_faults" }
+        "xmpp_sdlog", "xmpp_sdlog_faults", "xmpp_sdlog_relays" }
   or APP_PATH:find("/ping/", 1, true)
   and { "ping_tdeck", "ping_v4", "ping_no_contacts", "ping_round_trip", "ping_auto_reply", "ping_cost" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no
