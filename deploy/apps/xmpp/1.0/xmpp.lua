@@ -1,6 +1,7 @@
 -- XMPP chat through a wadamesh relay (scripts/xmpp-relay).
 -- Protocol: docs/superpowers/specs/2026-10-16-xmpp-app-design.md, section 2.
--- Sections: seal, codec, sync (setup, poll loop, outbox), screens, app callbacks.
+-- Sections: seal, codec, sync (setup, poll loop, outbox, SD history), screens,
+-- app callbacks.
 -- Nothing here runs at load time beyond defining functions.
 
 local app = {}
@@ -375,6 +376,235 @@ local function reset()
   changed()
 end
 
+-- ---- SD history (optional; spec section 3)
+-- One file per conversation in wada.fs, c<conv>.log, one line per message:
+--   <seq> TAB <ts> TAB <esc sender> TAB <esc text> LF
+-- Only when caps.sd and caps.sdk_ext and store "sd" == "1". Lines are buffered
+-- per conversation and flushed one fs call at a time (round robin), never
+-- within SD_GAP of the previous call: the host refuses writes less than 1 s
+-- apart with `false, "too fast"`, which just leaves the buffer for next time.
+-- A log that would pass SD_ROTATE is rotated over two flushes, because wada.fs
+-- has no rename: flush 1 copies the current .log to c<conv>.old (write
+-- replaces it), flush 2 writes the buffer as the new .log. Lines that arrive in
+-- between stay buffered. Any other write error (card pulled or full) stops the
+-- history for this session with one toast. The last seq on the card is read
+-- from the log's tail when a conversation's first message of the session comes
+-- in, so the cursor-0 replay on every open is not buffered or appended again.
+local SD_GAP, SD_ROTATE = 2000, 30720
+-- buffered bytes per conversation / over all of them: the total fits the session
+-- start (up to 40 conversations x 10 replayed messages) inside the 256 KB app heap
+local SD_PEND, SD_PEND_ALL = 8192, 49152
+local SD_TAIL, SD_HIST = 8192, 100         -- chat open: bytes read from the card, rows kept
+local SD_SEED = 2048                       -- tail read for the last seq (SD_TAIL if no line in it)
+
+local H = {
+  allowed = false,  -- caps.sd and caps.sdk_ext
+  on = false,       -- allowed, store sd == "1", and no write error this session
+  dead = false,     -- a write failed: off until the app is opened again
+  c = {},           -- conv -> { lines, seqs, bytes, top, logged, size, rot }
+  bytes = 0,        -- buffered bytes over all conversations
+  nrot = 0,         -- conversations between the two rotation flushes
+  drops = 0,        -- buffered lines dropped by the bounds
+  last = nil,       -- millis of the last write / append
+  turn = 0,         -- conv flushed last (round robin)
+  zero = false,     -- relay reset: seqs restarted, so a log's tail no longer counts
+}
+
+local function hist_conv(id)
+  local c = H.c[id]
+  if not c then
+    c = { lines = {}, seqs = {}, bytes = 0, top = 0 }
+    H.c[id] = c
+  end
+  return c
+end
+
+local function hist_unbuffer(c)
+  H.bytes = H.bytes - c.bytes
+  c.lines, c.seqs, c.bytes = {}, {}, 0
+end
+
+local function hist_drop_oldest(c)
+  local b = #c.lines[1]
+  table.remove(c.lines, 1)
+  table.remove(c.seqs, 1)
+  c.bytes, H.bytes, H.drops = c.bytes - b, H.bytes - b, H.drops + 1
+end
+
+-- seq of the last line in the tail of a log, and the file's size (nil, 0 when missing)
+local function hist_last(name)
+  local read = wada.fs.read
+  local _, total = read(name, 0, 0)
+  if not total or total == 0 then return nil, total or 0 end
+  local want = SD_SEED
+  repeat
+    local off = total > want and total - want or 0
+    local d = read(name, off, want)
+    if not d then return nil, total end
+    local last
+    for v in (off == 0 and "\n" .. d or d):gmatch("\n(%d+)\t") do last = v end
+    if last or off == 0 or want == SD_TAIL then return math.tointeger(tonumber(last)), total end
+    want = SD_TAIL                         -- one long last line: look further back once
+  until false
+end
+
+-- learn what is on the card; drop buffered lines it already holds
+local function hist_seed(id, c)
+  local last, size = hist_last("c" .. id .. ".log")
+  if not last then last = hist_last("c" .. id .. ".old") end   -- .log lost mid-rotation
+  c.size = size
+  c.logged = H.zero and 0 or (last or 0)
+  if c.logged > c.top then c.top = c.logged end
+  local seqs = c.seqs
+  while seqs[1] and seqs[1] <= c.logged do
+    local b = #c.lines[1]
+    table.remove(c.lines, 1)
+    table.remove(seqs, 1)
+    c.bytes, H.bytes = c.bytes - b, H.bytes - b
+  end
+end
+
+-- store sd / caps changed (or the app opened)
+local function hist_config()
+  H.on = H.allowed and not H.dead and sget("sd") == "1"
+  if not H.on then
+    for _, c in pairs(H.c) do
+      hist_unbuffer(c)
+      if c.rot then c.rot = nil; H.nrot = H.nrot - 1 end
+    end
+  end
+end
+
+local function hist_fail(err)
+  H.dead = true
+  hist_config()
+  wada.sys.toast("SD card history stopped: " .. tostring(err or "write failed"))
+end
+
+-- a confirmed message (seq from the relay) for conversation id
+local function hist_add(id, m)
+  if not H.on then return end
+  local c = hist_conv(id)
+  if not c.logged then hist_seed(id, c) end
+  if m.seq <= c.top then return end
+  c.top = m.seq
+  local line = m.seq .. "\t" .. m.ts .. "\t" .. esc(m.sender) .. "\t" .. esc(m.text) .. "\n"
+  local n = #c.lines + 1
+  c.lines[n], c.seqs[n] = line, m.seq
+  c.bytes, H.bytes = c.bytes + #line, H.bytes + #line
+  while c.bytes > SD_PEND do hist_drop_oldest(c) end
+  while H.bytes > SD_PEND_ALL do         -- many busy conversations: trim the biggest buffer
+    local big
+    for _, o in pairs(H.c) do if not big or o.bytes > big.bytes then big = o end end
+    hist_drop_oldest(big)
+  end
+end
+
+-- the relay's seqs restarted: what the card holds no longer filters anything
+local function hist_relay_reset()
+  H.zero = true
+  for _, c in pairs(H.c) do
+    c.top = 0
+    if c.logged then c.logged = 0 end
+  end
+end
+
+-- at most one fs call, and never within SD_GAP of the previous one
+local function hist_flush(t)
+  if not H.on or (H.bytes == 0 and H.nrot == 0) then return end
+  if H.last and t - H.last < SD_GAP then return end
+  local pick, first, turn = nil, nil, H.turn
+  for id, c in pairs(H.c) do
+    if c.bytes > 0 or c.rot then
+      if id > turn and (not pick or id < pick) then pick = id end
+      if not first or id < first then first = id end
+    end
+  end
+  pick = pick or first
+  H.turn = pick
+  local c = H.c[pick]
+  if not c.logged then
+    hist_seed(pick, c)
+    if c.bytes == 0 then return end      -- all of it was on the card already
+  end
+  local fs, name = wada.fs, "c" .. pick .. ".log"
+  local block = concat(c.lines)
+  local ok, err, replaced
+  if c.rot then                            -- rotation, flush 2: the buffer is the new log
+    ok, err = fs.write(name, block)
+    replaced = ok
+  elseif c.size + #block > SD_ROTATE then
+    local cur = fs.read(name)
+    if cur and cur ~= "" then              -- rotation, flush 1: keep the current log as .old
+      ok, err = fs.write("c" .. pick .. ".old", cur)
+      if ok then c.rot = true; H.nrot = H.nrot + 1 end
+      block = nil
+    else
+      ok, err = fs.write(name, block)
+      replaced = ok
+    end
+  else
+    ok, err = fs.append(name, block)
+  end
+  H.last = t
+  if not ok then
+    if err ~= "too fast" then hist_fail(err) end
+    return
+  end
+  if not block then return end
+  if replaced then
+    c.size = #block
+    if c.rot then c.rot = nil; H.nrot = H.nrot - 1 end
+  else
+    c.size = c.size + #block
+  end
+  c.logged = c.seqs[#c.seqs] or c.logged
+  hist_unbuffer(c)
+end
+
+-- {seq, sender, text} ascending: the card's tail for conversation id (the end
+-- of .old too when .log is short) plus lines not flushed yet, older than
+-- before_seq (nil = all), each seq once, at most SD_HIST.
+local function hist_parse(d, out, seen, before)
+  for line in d:gmatch("([^\n]*)\n") do
+    local f = fields(line)
+    local s = math.tointeger(tonumber(f[1]))
+    if s and f[4] and not seen[s] and (not before or s < before) then
+      seen[s] = true
+      out[#out + 1] = { seq = s, sender = unesc(f[3]), text = unesc(f[4]) }
+    end
+  end
+end
+
+local function hist_tail_of(name, want)
+  local read = wada.fs.read
+  local _, total = read(name, 0, 0)
+  if not total or total == 0 then return "", 0 end
+  local off = total > want and total - want or 0
+  local d = read(name, off, want) or ""
+  if off > 0 then                          -- drop the partial first line
+    local p = d:find("\n", 1, true)
+    d = p and ssub(d, p + 1) or ""
+  end
+  return d, total
+end
+
+local function hist_tail(id, before)
+  if not H.on then return {} end
+  local c = hist_conv(id)
+  if not c.logged then hist_seed(id, c) end
+  local d, total = hist_tail_of("c" .. id .. ".log", SD_TAIL)
+  local out, seen = {}, {}
+  if total < SD_TAIL then
+    hist_parse((hist_tail_of("c" .. id .. ".old", SD_TAIL - total)), out, seen, before)
+  end
+  hist_parse(d, out, seen, before)
+  hist_parse(concat(c.lines), out, seen, before)
+  local extra = #out - SD_HIST
+  if extra > 0 then table.move(out, extra + 1, #out, 1); for i = #out, SD_HIST + 1, -1 do out[i] = nil end end
+  return out
+end
+
 -- ---- applying a reply
 local function evict_convs()
   local list = {}
@@ -404,9 +634,14 @@ local function apply_view(r)
     local cv = m.conv and m.seq and m.ts and convs[m.conv]
     if cv and m.seq > cv.seq then
       local t = cv.msgs
-      t[#t + 1] = { seq = m.seq, ts = m.ts, sender = m.sender, text = m.text }
-      if #t > MAX_MSGS then table.remove(t, 1) end
+      local nm = { seq = m.seq, ts = m.ts, sender = m.sender, text = m.text }
+      t[#t + 1] = nm
+      if #t > MAX_MSGS then
+        local old = table.remove(t, 1)
+        if S.on_drop then S.on_drop(m.conv, old) end   -- an open chat keeps it on screen
+      end
       cv.seq, cv.act = m.seq, m.seq
+      hist_add(m.conv, nm)
     end
   end
   if S.nconv > MAX_CONVS then evict_convs() end
@@ -471,6 +706,7 @@ local function on_reply(req, status, body)
   if req.cursor > 0 and r.cursor < req.cursor then
     clear_view()           -- relay database lost or replaced: resync from 0 now
     S.reads = {}           -- their seqs belong to the lost revision
+    hist_relay_reset()
     S.next_at = t
   else
     apply_view(r)
@@ -500,6 +736,7 @@ local function sync(t)
 end
 
 local function step()
+  hist_flush(now())
   if S.state == "deriving" then
     if kdf_step(S.kdf, KDF_ITERS) then
       local st, url = S.kdf, S.kdf_url
@@ -705,6 +942,7 @@ end
 local function new_screen(name)
   wada.ui.clear()
   ui.screen, ui.list, ui.rows, ui.cols, ui.ids = name, nil, {}, {}, {}
+  ui.htexts, ui.hcols, S.on_drop = {}, {}, nil
 end
 
 -- ---- conversation list
@@ -757,19 +995,34 @@ function show_list()
 end
 
 -- ---- chat
+-- With SD history on, the rows start with the card's tail (ui.htexts), older
+-- than the relay's window; a message the RAM bound drops while the chat is open
+-- moves there too, so the rows only ever grow at the bottom.
+local function msg_row(m, room)
+  local C = wada.ui.colors
+  if m.sender == "" then return "> " .. m.text, C.accent end
+  if room then return m.sender .. ": " .. m.text, C.text end
+  return m.text, C.text
+end
+
+local function hist_push(m)
+  local n = #ui.htexts + 1
+  ui.htexts[n], ui.hcols[n] = msg_row(m, ui.room)
+  if n > SD_HIST then table.remove(ui.htexts, 1); table.remove(ui.hcols, 1) end
+end
+
 local function refresh_chat()
   local id = ui.conv
   local cv = S.convs[id]
   if cv and (cv.unread or 0) > 0 then mark_read(id) end   -- read while it is on screen
-  local C = wada.ui.colors
-  local own, plain = C.accent, C.text
+  local own = wada.ui.colors.accent
   local room = ui.room
-  local texts, cols, n = {}, {}, 0
+  local texts, cols, n = {}, {}, #ui.htexts
+  table.move(ui.htexts, 1, n, 1, texts)
+  table.move(ui.hcols, 1, n, 1, cols)
   for _, m in ipairs(msgs(id)) do
     n = n + 1
-    if m.sender == "" then texts[n], cols[n] = "> " .. m.text, own
-    elseif room then texts[n], cols[n] = m.sender .. ": " .. m.text, plain
-    else texts[n], cols[n] = m.text, plain end
+    texts[n], cols[n] = msg_row(m, room)
   end
   for _, p in ipairs(pending(id)) do
     n = n + 1
@@ -803,6 +1056,11 @@ function show_chat(id)
   local _, _, _, y = top_bar({ "Back", function() show_list() end }, name, 14, wada.ui.colors.text,
                              { "Write", write })
   ui.list = wada.ui.list(ui.M, y, ui.W - 2 * ui.M, ui.H - y - ui.M)
+  if H.on then
+    local first = cv.msgs[1]
+    for _, m in ipairs(hist_tail(id, first and first.seq)) do hist_push(m) end
+    S.on_drop = function(conv, m) if conv == id then hist_push(m) end end
+  end
   mark_read(id)                    -- R <conv> <newest seq> on the next request
   refresh_chat()
 end
@@ -847,7 +1105,8 @@ function show_settings()
   local acts = { function() setup() end, function() setup(true) end }
   if ui.sd then
     acts[#acts + 1] = function()
-      wada.store.set("sd", sd_on() and "0" or "1")   -- Task 8 keeps the history files
+      wada.store.set("sd", sd_on() and "0" or "1")   -- off stops writing; the files stay
+      hist_config()
       refresh_settings()
     end
   end
@@ -870,6 +1129,8 @@ function app.on_open(w, h)
   metrics(w, h)
   local caps = wada.sys.caps and wada.sys.caps() or {}
   ui.sd = (caps.sd and caps.sdk_ext) and true or false
+  H.allowed = ui.sd
+  hist_config()
   local configured = load_config()
   if not configured then S.state = "setup" end
   show_list()
@@ -919,6 +1180,12 @@ app._t = {
   state = function() return S.state end,
   header = header,
   rev = function() return S.rev end,
+  -- SD history: { on, dead, drops, pending = {conv -> buffered bytes} }
+  sd_stats = function()
+    local p = {}
+    for id, c in pairs(H.c) do p[id] = c.bytes end
+    return { on = H.on, dead = H.dead, drops = H.drops, pending = p }
+  end,
 }
 
 return app

@@ -408,25 +408,49 @@ local function build_wada()
   -- Semantics follow LuaAppHost.cpp: read returns data plus the file's TOTAL
   -- size so a caller can window a growing log, an offset at or past the end is
   -- an empty string rather than nil, and a missing file is nil.
+  -- write / append share fsWriteCommon's checks, in its order: a bad name, a
+  -- data string over 32 KB ("too big"; append checks only the data, not the
+  -- file it grows), then the per-app rate limit -- a write or append less than
+  -- 1000 ms after the previous one that got past the limit is `false, "too
+  -- fast"` and does not move the window. A refused call (bad name, too big,
+  -- too fast) is not a write; remove and read are not rate-limited.
+  -- fs_fail(name, data, mode) may return an error string to fail a write the
+  -- way a pulled or full card does ("write failed"), after the rate limit.
   fsfiles = {}
+  local FS_MAX, FS_GAP = 32 * 1024, 1000
+  local fs_last = 0
+  local function fs_name_ok(n)
+    return type(n) == "string" and #n > 0 and #n <= 32 and n:sub(1, 1) ~= "." and not n:find("[^%w._-]")
+  end
+  local function fs_write(name, data, mode)
+    if not fs_name_ok(name) then return false, "bad name" end
+    if #data > FS_MAX then return false, "too big" end
+    if fs_last ~= 0 and clock_ms - fs_last < FS_GAP then return false, "too fast" end
+    fs_last = clock_ms
+    local err = cfg.fs_fail and cfg.fs_fail(name, data, mode)
+    if err then return false, err end
+    if mode == "a" then fsfiles[name] = (fsfiles[name] or "") .. data else fsfiles[name] = data end
+    return true
+  end
   wada.fs.write = function(name, data)
     checkstr(name, "fs.write name"); checkstr(data, "fs.write data")
-    fsfiles[name] = data; return true
+    return fs_write(tostring(name), tostring(data), "w")
   end
   wada.fs.append = function(name, data)
     checkstr(name, "fs.append name"); checkstr(data, "fs.append data")
-    fsfiles[name] = (fsfiles[name] or "") .. data; return true
+    return fs_write(tostring(name), tostring(data), "a")
   end
   wada.fs.read = function(name, off, want)
     checkstr(name, "fs.read name")
+    if not fs_name_ok(name) then return nil end
     local d = fsfiles[name]
     if d == nil then return nil end
     off = off or 0
-    if off < 0 then return nil end
+    want = want or FS_MAX
+    if off < 0 or want < 0 then return nil end
     local total = #d
     if off >= total then return "", total end
-    want = want or (total - off)
-    if want < 0 then return nil end
+    if want > FS_MAX then want = FS_MAX end   -- one read never hands back more than 32 KB
     return d:sub(off + 1, off + want), total
   end
   wada.fs.list = function()
@@ -3336,6 +3360,308 @@ scenarios.xmpp_cost = function()
   assert(open_cost < BUDGET, "opening a chat over budget")
 end
 
+-- ---- xmpp: SD history (Task 8) ----------------------------------------------
+-- every wada.fs write / append the app makes: { at, name, mode, ok, err }
+local function xm_fs_log()
+  local log = {}
+  for _, mode in ipairs({ "write", "append" }) do
+    local f = wada.fs[mode]
+    wada.fs[mode] = function(name, data)
+      local ok, err = f(name, data)
+      log[#log + 1] = { at = clock_ms, name = name, mode = mode, ok = ok, err = err, n = #data }
+      return ok, err
+    end
+  end
+  return log
+end
+
+-- the seqs in a log file's lines, in order; asserts each line is well formed
+local function xm_log_seqs(name, T)
+  local d = fsfiles[name]
+  if not d then return {} end
+  assert(d == "" or d:sub(-1) == "\n", name .. " must end with a newline")
+  local out = {}
+  for line in d:gmatch("([^\n]*)\n") do
+    local f = T.fields(line)
+    assert(#f == 4 and math.tointeger(tonumber(f[1])) and math.tointeger(tonumber(f[2])),
+      name .. ": bad line " .. line)
+    out[#out + 1] = tonumber(f[1])
+  end
+  return out
+end
+
+-- one 100-byte message text for seq k (printable, with an escaped tab in it)
+local function xm_text100(k)
+  local s = string.format("msg %05d\t", k)
+  return s .. ("x"):rep(100 - #s)
+end
+
+-- A relay that releases message k (seq k) at t0 + k * gap ms into conv 1,
+-- answering up to ~5.5 KB per reply with more = 1 while released ones remain.
+-- On a new session (cursor 0) it replays the newest `replay` released messages.
+-- Every 50th message is an own one (sender "").
+-- With nconv > 1, message k goes to conv (k % nconv) + 1 instead.
+local function xm_feed_relay(T, total, gap, replay, nconv)
+  local st = { t0 = clock_ms, sent = 0, total = total }
+  nconv = nconv or 1
+  local log = xm_relay(T, function(req)
+    local out = { L("P", req.q) }
+    for c = 1, nconv do out[#out + 1] = L("C", c, "chat", "u" .. c .. "@x.test", c == 1 and "Alice" or "U" .. c, "on", 0) end
+    local released = math.min(st.total, (clock_ms - st.t0) // gap)
+    local from = st.sent + 1
+    if req.cursor == 0 then from = math.max(1, released - (replay or 10) + 1) end
+    local bytes, k = 0, from
+    while k <= released and bytes < 5500 do
+      local l = L("G", nconv == 1 and 1 or k % nconv + 1, k, 1700000000 + k, k % 50 == 0 and "" or "alice@x.test",
+                  T.esc(xm_text100(k)))
+      out[#out + 1] = l; bytes = bytes + #l; k = k + 1
+    end
+    if k - 1 > st.sent then st.sent = k - 1 end
+    out[#out + 1] = L("N", math.max(st.sent, 1), k <= released and 1 or 0)
+    return table.concat(out)
+  end)
+  return st, log
+end
+
+scenarios.xmpp_sdlog = function()
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  local fl = xm_fs_log()
+  local st = xm_feed_relay(T, 400, 150, 10)       -- 400 messages over 60 s
+  xm_open(app)
+  local steady, flush, wrote = 0, 0, 0
+  local function metered_ticks(n)
+    for _ = 1, n do
+      local before = #fl
+      XM.tick = 0
+      xm_tick(app)
+      if #fl > before then
+        if XM.tick > flush then flush = XM.tick end
+      elseif XM.tick > steady then steady = XM.tick end
+    end
+  end
+  metered_ticks(60000 // 250 + 4 * 30)             -- 60 s of messages, then 30 s to drain
+  assert(st.sent == 400, "relay delivered all 400 messages, got " .. st.sent)
+  assert(#fl > 5, "the app wrote its history: " .. #fl .. " fs calls")
+  for i = 2, #fl do
+    assert(fl[i].at - fl[i - 1].at >= 2000,
+      string.format("fs call %d (%s %s) %d ms after the previous", i, fl[i].mode, fl[i].name, fl[i].at - fl[i - 1].at))
+  end
+  for _, w in ipairs(fl) do assert(w.ok, "fs " .. w.mode .. " " .. w.name .. " failed: " .. tostring(w.err)) end
+  assert(fsfiles["c1.log"] and #fsfiles["c1.log"] <= 30720, "c1.log over 30720 bytes: " .. #(fsfiles["c1.log"] or ""))
+  assert(fsfiles["c1.old"], "c1.log was rotated to c1.old")
+  local seen, n = {}, 0
+  for _, name in ipairs({ "c1.old", "c1.log" }) do
+    local last = 0
+    for _, s in ipairs(xm_log_seqs(name, T)) do
+      assert(not seen[s], "seq " .. s .. " logged twice")
+      assert(s > last, name .. ": seqs out of order at " .. s)
+      seen[s], last, n = true, s, n + 1
+    end
+  end
+  for k = 1, 400 do assert(seen[k], "seq " .. k .. " missing from c1.old + c1.log") end
+  -- a log line is <seq> TAB <ts> TAB <esc sender> TAB <esc text>
+  local first = fsfiles["c1.old"]:match("^([^\n]*)\n")
+  assert(first == "1\t1700000001\talice@x.test\t" .. T.esc(xm_text100(1)), "log line format: " .. first)
+  assert(fsfiles["c1.old"]:find("\n50\t1700000050\t\t" .. T.esc(xm_text100(50)) .. "\n", 1, true),
+    "own messages (sender \"\") are logged")
+  print(string.format("  400 msgs: %d fs writes, c1.old %d B + c1.log %d B, every seq once",
+    #fl, #fsfiles["c1.old"], #fsfiles["c1.log"]))
+
+  -- reopen: the relay replays the newest 10 at cursor 0; none is appended again
+  local logbytes, oldbytes = fsfiles["c1.log"], fsfiles["c1.old"]
+  app.on_close()
+  app = load_app()
+  T = app._t
+  xm_open(app)
+  metered_ticks(4 * 20)
+  assert(#T.msgs(1) == 10, "replay of the newest 10 applied, got " .. #T.msgs(1))
+  assert(fsfiles["c1.log"] == logbytes and fsfiles["c1.old"] == oldbytes, "reopen appended duplicates")
+
+  -- the chat shows the card's tail before the relay's window
+  assert(xm_list(), "conversation list")
+  local reply_cb = XM.cb
+  XM.cb = 0
+  xm_pick(1)
+  local open_cost = XM.cb
+  local rows = xm_rows()
+  assert(#rows > 50, "chat with SD history shows more than 50 rows, got " .. #rows)
+  local prev = 0
+  for i, r in ipairs(rows) do
+    local k = tonumber(r:match("^msg (%d+)\t") or r:match("^> msg (%d+)\t"))
+    assert(k and k > prev, "row " .. i .. " out of order or duplicated: " .. r)
+    prev = k
+  end
+  assert(prev == 400 and rows[#rows]:sub(1, 2) == "> ", "last row is the newest message, an own one")
+  xm_assert_layout("chat with SD history")
+  -- 60 more while the chat is open: what the 50-message bound drops stays on
+  -- screen above the window, so rows are only added at the bottom
+  local nrows = #rows
+  st.total = 460
+  metered_ticks(4 * 15)
+  rows = xm_rows()
+  assert(#rows == nrows + 60, "open chat grew by 60 rows, has " .. #rows .. " (was " .. nrows .. ")")
+  prev = 0
+  for i, r in ipairs(rows) do
+    local k = tonumber(r:match("^msg (%d+)\t") or r:match("^> msg (%d+)\t"))
+    assert(k and k > prev, "row " .. i .. " out of order or duplicated after more arrived: " .. r)
+    prev = k
+  end
+  assert(prev == 460, "newest row after more arrived")
+  print(string.format("  steady ticks worst ~%d; flush ticks worst ~%d; reply callbacks worst ~%d; chat open with tail read ~%d; %d rows",
+    steady, flush, math.max(reply_cb, XM.cb), open_cost, #rows))
+  assert(steady < 25000, "steady tick over 25,000")
+  assert(flush < BUDGET and open_cost < BUDGET and reply_cb < BUDGET and XM.cb < BUDGET, "flush tick, reply or chat open over budget")
+end
+
+-- SD history off, "too fast", a failing card, and the buffer bound
+scenarios.xmpp_sdlog_faults = function()
+  -- 1. caps.sd missing: nothing is written even with sd = "1"
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  local caps = wada.sys.caps
+  wada.sys.caps = function() local c = caps(); c.sd = false; return c end
+  local app = load_app()
+  local T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  local fl = xm_fs_log()
+  xm_feed_relay(T, 40, 150)
+  xm_open(app)
+  xm_tick(app, 4 * 20)
+  assert(#T.msgs(1) > 0 and #fl == 0, "no caps.sd: no fs writes")
+
+  -- 2. sd = "0": nothing written; switching it on logs only what comes after
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  storekv.sd = "0"
+  fl = xm_fs_log()
+  local st = xm_feed_relay(T, 200, 150)
+  xm_open(app)
+  xm_tick(app, 4 * 10)
+  assert(#fl == 0 and next(fsfiles) == nil, "sd off: no fs writes")
+  press("Settings")
+  xm_pick_text("Keep history on SD card")
+  assert(storekv.sd == "1", "toggled on")
+  press("Back")
+  xm_tick(app, 4 * 10)
+  assert(#fl > 0 and fsfiles["c1.log"], "sd on: history written")
+  local firstlogged = xm_log_seqs("c1.log", T)[1]
+  assert(firstlogged > 1, "messages from before the switch are not logged")
+  -- switching it off stops writes and leaves the file
+  press("Settings")
+  xm_pick_text("Keep history on SD card")
+  assert(storekv.sd == "0", "toggled off")
+  press("Back")
+  local n, keep = #fl, fsfiles["c1.log"]
+  xm_tick(app, 4 * 10)
+  assert(#fl == n and fsfiles["c1.log"] == keep, "sd off: writes stop, the file stays")
+
+  -- 3. "too fast" keeps the buffer: every seq still lands exactly once
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  local refuse = 3
+  cfg.fs_fail = nil
+  fl = xm_fs_log()
+  local append = wada.fs.append
+  wada.fs.append = function(name, data)
+    if refuse > 0 then refuse = refuse - 1; fl[#fl + 1] = { at = clock_ms, ok = false, err = "too fast" }; return false, "too fast" end
+    return append(name, data)
+  end
+  st = xm_feed_relay(T, 60, 150)
+  xm_open(app)
+  xm_tick(app, 4 * 30)
+  assert(refuse == 0, "too-fast refusals happened")
+  local seqs = xm_log_seqs("c1.log", T)
+  assert(#seqs == 60, "after too fast, all 60 seqs logged once, got " .. #seqs)
+  for i, s in ipairs(seqs) do assert(s == i, "seq order after too fast") end
+  assert(#toasts == 0, "too fast is not an error")
+
+  -- 4. a pulled card: one toast, logging stops, the app keeps syncing
+  toasts = {}
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  fl = xm_fs_log()
+  local pulled = false
+  cfg.fs_fail = function() if pulled then return "write failed" end end
+  st = xm_feed_relay(T, 200, 150)
+  xm_open(app)
+  xm_tick(app, 4 * 10)
+  assert(#fl > 0 and fl[#fl].ok, "writing before the card is pulled")
+  pulled = true
+  local before = #fl
+  xm_tick(app, 4 * 30)
+  assert(#fl == before + 1 and not fl[#fl].ok, "one failed write, then no more: " .. (#fl - before))
+  assert(#toasts == 1, "exactly one toast, got " .. #toasts)
+  assert(T.state() == "online" and #T.msgs(1) == 50, "the app keeps running and syncing")
+
+  -- 5. the buffer is bounded: a card that always says "too fast"
+  toasts = {}
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  wada.fs.append = function() return false, "too fast" end
+  wada.fs.write = function() return false, "too fast" end
+  st = xm_feed_relay(T, 400, 50)
+  xm_open(app)
+  xm_tick(app, 4 * 40)
+  assert(st.sent == 400, "all delivered")
+  local sd = T.sd_stats()
+  assert(sd.pending[1] and sd.pending[1] <= 8192, "pending buffer bounded at 8 KB: " .. tostring(sd.pending[1]))
+  assert(sd.drops > 0, "dropped lines are counted")
+  assert(#toasts == 0, "too fast never stops logging: " .. table.concat(toasts, " | "))
+  local one = sd.pending[1]
+
+  -- 6. many busy conversations: all buffers together stay under 48 KB
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  wada.fs.append = function() return false, "too fast" end
+  wada.fs.write = function() return false, "too fast" end
+  st = xm_feed_relay(T, 1200, 15, 10, 8)
+  xm_open(app)
+  xm_tick(app, 4 * 40)
+  assert(st.sent == 1200, "all delivered to 8 convs")
+  sd = T.sd_stats()
+  local all = 0
+  for c = 1, 8 do
+    assert(sd.pending[c] and sd.pending[c] > 0 and sd.pending[c] <= 8192, "conv " .. c .. " buffer " .. tostring(sd.pending[c]))
+    all = all + sd.pending[c]
+  end
+  assert(all <= 49152, "all buffers together bounded at 48 KB: " .. all)
+
+  -- 7. a session-start burst over 20 conversations (26 KB, nothing on the card
+  -- yet) is kept whole and flushed round robin, one call per 2 s
+  xm_ui_world(320, 240, { touch = true, keyboard = false })
+  app = load_app(); T = app._t
+  xm_configured_store(T)
+  storekv.sd = "1"
+  fl = xm_fs_log()
+  st = xm_feed_relay(T, 200, 1, 200, 20)
+  clock_ms = clock_ms + 1000                       -- all 200 released before the first request
+  xm_open(app)
+  xm_tick(app, 4 * 60)
+  assert(T.sd_stats().drops == 0, "nothing dropped from the burst")
+  for c = 1, 20 do
+    local seqs = xm_log_seqs("c" .. c .. ".log", T)
+    assert(#seqs == 10, "conv " .. c .. ": 10 lines, got " .. #seqs)
+    for i, k in ipairs(seqs) do assert(k % 20 + 1 == c and (i == 1 or k > seqs[i - 1]), "conv " .. c .. " seqs") end
+  end
+  assert(#fl >= 20 and #fl <= 25, "about one append per conversation (the burst spans a few replies), got " .. #fl)
+  for i = 2, #fl do assert(fl[i].at - fl[i - 1].at >= 2000, "burst flush gap") end
+  print(string.format("  no caps.sd, off/on/off, too fast, pulled card, bounds (%d B; 8 convs %d B), 20-conv burst ok",
+    one, all))
+end
+
 -- True (and says so) when this app has no scenarios of its own. Returning a
 -- truthy value makes the dispatch below pick an EMPTY list rather than running
 -- someone else's tests against it.
@@ -3360,7 +3686,8 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   or APP_PATH:find("/xmpp/", 1, true)
   and { "harness_crypto", "xmpp_seal_vectors", "xmpp_kdf_budget", "xmpp_setup", "xmpp_sync", "xmpp_failures",
         "xmpp_post_raises", "xmpp_relay_reset", "xmpp_outbox", "xmpp_bounds",
-        "xmpp_chat", "xmpp_empty", "xmpp_v4", "xmpp_m9", "xmpp_cost" }
+        "xmpp_chat", "xmpp_empty", "xmpp_v4", "xmpp_m9", "xmpp_cost",
+        "xmpp_sdlog", "xmpp_sdlog_faults" }
   or APP_PATH:find("/ping/", 1, true)
   and { "ping_tdeck", "ping_v4", "ping_no_contacts", "ping_round_trip", "ping_auto_reply", "ping_cost" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no
