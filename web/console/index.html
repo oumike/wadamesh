@@ -2,13 +2,14 @@
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>wadamesh</title>
+<!--#include icon.html-->
 <style>
 /*#include theme.css*/
 html,body{height:100%;overflow:hidden}
 #app{display:flex;flex-direction:column;height:100%}
 header{display:flex;align-items:center;gap:16px;padding:0 16px;height:52px;flex:none;background:var(--bg2);border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px;letter-spacing:.02em;white-space:nowrap}
-.brand i{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,var(--acc),color-mix(in srgb,var(--acc) 55%,#2c6bcf));box-shadow:inset 0 0 0 5px var(--bg2),0 0 0 1px var(--acc)}
+.brand .logo{width:33px;height:22px;flex:none}
 nav{display:flex;gap:2px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:3px;overflow-x:auto;margin-left:auto}
 nav button{display:flex;align-items:center;gap:7px;background:none;border:0;color:var(--sub);font-size:13.5px;font-weight:500;padding:6px 12px;border-radius:7px;white-space:nowrap}
 nav button:hover{color:var(--text)}nav button.on{background:var(--panel);color:var(--text);box-shadow:var(--shadow)}
@@ -20,7 +21,7 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;ba
 @media(max-width:600px){header{gap:8px;padding:0 8px}.brand span{display:none}nav{margin-left:0;flex:1}nav button{flex:1;justify-content:center;padding:6px 6px}nav button b{display:none}}
 </style></head>
 <body><div id="app">
-<header><div class="brand"><i></i><span>wadamesh</span></div>
+<header><div class="brand"><!--#include logo.svg--><span>wadamesh</span></div>
 <nav>
 <button data-v="dashboard" hidden title="Dashboard"><svg viewBox="0 0 24 24"><rect x=3 y=3 width=7 height=9 rx=1.5 /><rect x=14 y=3 width=7 height=5 rx=1.5 /><rect x=14 y=12 width=7 height=9 rx=1.5 /><rect x=3 y=16 width=7 height=5 rx=1.5 /></svg><b>Dashboard</b></button>
 <button data-v="mesh" hidden title="Mesh"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg><b>Mesh</b></button>

@@ -4,11 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WADAMESH File Transfer</title>
+<!--#include icon.html-->
 <style>
 /*#include theme.css*/
 body{min-height:100vh}
 main{width:min(600px,100%);margin:0 auto;padding:24px 16px 40px}
-header{display:flex;align-items:center;gap:10px;margin-bottom:16px}header b{font-size:15px;font-weight:600;letter-spacing:.06em}header i{width:8px;height:8px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 4px var(--acc-soft)}
+header{display:flex;align-items:center;gap:10px;margin-bottom:16px}header b{font-size:15px;font-weight:600;letter-spacing:.06em}header .logo{width:30px;height:20px;flex:none}
 section{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:16px;margin:16px 0}
 label{display:block;color:var(--sub);font-size:12px;font-weight:500;margin-bottom:8px}
 input,button,select{border-radius:8px;min-height:40px}
@@ -32,7 +33,7 @@ small{display:block;color:var(--faint);font-size:12px;line-height:1.5;margin-top
 </style>
 </head>
 <body><main>
-<header><i></i><b>WADAMESH FILE TRANSFER</b></header>
+<header><!--#include logo.svg--><b>WADAMESH FILE TRANSFER</b></header>
 <section>
   <label for="code">Approve this browser on the device, or enter the 6-digit code it shows</label>
   <input id="code" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code">
