@@ -7,6 +7,7 @@
 #include <esp_heap_caps.h>
 #include "WebMirror.h"
 #include "WebConsoleAssets.h"
+#include "../../ui-touch/device_caps.h"   // CAP_WEB_CONSOLE_SETTINGS: the Settings and Dashboard tabs
 #if WADA_WEB_FILE_TRANSFER
 #include "WebFileTransfer.h"
 #include "WebFileTransferPage.h"
@@ -17,7 +18,8 @@
 #endif
 
 #define TCP_WRITE_TIMEOUT_MS   120
-#define WS_PAGE_WRITE_TIMEOUT_MS 1500      // a console page is up to ~12 KB gzipped; it is sent once per page load
+#define WS_PAGE_SEND_MS        10000        // a console page (up to ~13 KB gzipped) must have left by then
+#define WS_PAGE_CHUNK          1436         // one TCP segment: a probed-writable socket takes it without blocking
 #define WS_WEDGED_DROP_MS      10000
 #define WS_AUTH_TIMEOUT_MS     45000        // a browser socket must be approved within this, or it is dropped (frees the slot); longer than the device's 30 s request so its answer arrives first
 #define WS_MIRROR_WRITE_TIMEOUT_MS 250   // mirror bands are bigger than companion frames — a little more headroom before we treat the frame as unrecoverable
@@ -134,6 +136,8 @@ WebSocketCompanionServer::WebSocketCompanionServer()
     _clients[i].auth_failures = 0;
     _clients[i].meta_sent = false;
     _clients[i].lock_sent = 0xFF;
+    _clients[i].page_ptr = nullptr;
+    _clients[i].page_len = _clients[i].page_sent = _clients[i].page_ms = 0;
   #if WADA_WEB_FILE_TRANSFER
     _clients[i].files_request_pending = false;
     _clients[i].files_frame_started_ms = 0;
@@ -161,6 +165,7 @@ void WebSocketCompanionServer::stop() {
     if (_clients[i].in_use) {
       _clients[i].client.stop();
       _clients[i].in_use = false;
+      _clients[i].page_ptr = nullptr;
     }
   }
 }
@@ -232,6 +237,8 @@ void WebSocketCompanionServer::adoptClient(WiFiClient& incoming) {
   _clients[slot].auth_failures = 0;
   _clients[slot].meta_sent = false;
   _clients[slot].lock_sent = 0xFF;
+  _clients[slot].page_ptr = nullptr;
+  _clients[slot].page_len = _clients[slot].page_sent = 0;
 #if WADA_WEB_FILE_TRANSFER
   _clients[slot].files_request_pending = false;
   _clients[slot].files_frame_started_ms = 0;
@@ -254,18 +261,65 @@ void WebSocketCompanionServer::pruneDisconnected() {
   uint32_t now = millis();
   for (int i = 0; i < WS_COMPANION_MAX_CLIENTS; i++) {
     if (!_clients[i].in_use) continue;
-    bool stale_handshake = !_clients[i].handshake_done &&
+    bool stale_handshake = !_clients[i].handshake_done && !_clients[i].page_ptr &&
                            (now - _clients[i].accept_ms) > WS_HANDSHAKE_TIMEOUT_MS;
     if (!_clients[i].client.connected() || stale_handshake) {
       _clients[i].client.stop();
       _clients[i].in_use = false;
+      _clients[i].page_ptr = nullptr;
     }
   }
+}
+
+// The value of request header `name` (matched case-insensitively at a line start), its
+// length in *len; nullptr when the request has no such header.
+static const char* httpHeader(const char* req, const char* name, size_t* len) {
+  const size_t nl = strlen(name);
+  for (const char* l = strstr(req, "\r\n"); l; l = strstr(l, "\r\n")) {
+    l += 2;
+    if (strncasecmp(l, name, nl) != 0 || l[nl] != ':') continue;
+    const char* v = l + nl + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    const char* e = v;
+    while (*e && *e != '\r' && *e != '\n') e++;
+    while (e > v && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    *len = (size_t)(e - v);
+    return v;
+  }
+  return nullptr;
+}
+
+// True when the request carries an Origin that is not the address it was sent to: a
+// page from another site (or another host on the LAN) the user happens to have open.
+// Browsers send Origin on every WebSocket upgrade and every cross-origin fetch; the
+// companion app and other non-browser clients send none, and those stay allowed.
+static bool crossOrigin(const char* req) {
+  size_t ol = 0, hl = 0;
+  const char* o = httpHeader(req, "Origin", &ol);
+  if (!o) return false;
+  const char* h = httpHeader(req, "Host", &hl);
+  const char* sep = nullptr;
+  for (size_t i = 0; i + 3 <= ol; i++)
+    if (o[i] == ':' && o[i + 1] == '/' && o[i + 2] == '/') { sep = o + i + 3; break; }
+  if (!h || !sep) return true;   // "Origin: null" (a sandboxed or file: page) included
+  const size_t rest = ol - (size_t)(sep - o);
+  return rest != hl || strncasecmp(sep, h, hl) != 0;
+}
+
+// The peer's IPv4 address for the approval card (0 when this transport cannot tell).
+static uint32_t clientIp(WiFiClient& client) {
+#if defined(HAS_TDISPLAY_P4) && !TDP4_C6_HOSTED
+  (void)client;
+  return 0;   // AT links have no lwIP socket to ask
+#else
+  return static_cast<uint32_t>(client.remoteIP());
+#endif
 }
 
 bool WebSocketCompanionServer::doHandshake(int idx) {
   WSClientState* c = &_clients[idx];
   WiFiClient* cl = &c->client;
+  if (c->page_ptr) { drainPage(idx); return false; }
   while (cl->available() && c->handshake_len < WS_HANDSHAKE_MAX_LEN - 1) {
     char ch = (char)cl->read();
     c->handshake_buf[c->handshake_len++] = ch;
@@ -302,6 +356,17 @@ bool WebSocketCompanionServer::doHandshake(int idx) {
           }
           if (c->is_files && (!g_web_file_transfer.enabled() || another_files)) unavailable = true;
 #endif
+          // The console's sockets only take a page served from this device. The companion
+          // protocol path stays open to any client (the official app, the web client).
+          if ((c->is_mirror || c->is_term || c->is_files) && crossOrigin(c->handshake_buf)) {
+            static const char forbidden[] = "HTTP/1.1 403 Forbidden\r\n"
+                                            "Content-Length: 0\r\nConnection: close\r\n\r\n";
+            writeAllBytes(*cl, reinterpret_cast<const uint8_t*>(forbidden), sizeof(forbidden) - 1,
+                          TCP_WRITE_TIMEOUT_MS);
+            c->client.stop();
+            c->in_use = false;
+            return false;
+          }
           if (unavailable) {
             const char* refused = "HTTP/1.1 503 Service Unavailable\r\n"
                                   "Content-Length: 0\r\nConnection: close\r\n\r\n";
@@ -343,6 +408,7 @@ bool WebSocketCompanionServer::doHandshake(int idx) {
         }
       }
       servePage(idx);
+      if (c->page_ptr) { drainPage(idx); return false; }   // the body goes out over the next loops
       c->client.stop();
       c->in_use = false;
       return false;
@@ -688,7 +754,7 @@ void WebSocketCompanionServer::authFrame(int idx, const uint8_t* buf, size_t len
     const size_t id_len = sp ? (size_t)(sp - id) : strlen(id);
     if (!consoleKey(id, id_len, c->key)) { reply = "ERR reload the page"; c->close_after_tx = true; }
     else {
-      switch (g_web_session.hello(c->key, sp ? sp + 1 : "")) {
+      switch (g_web_session.hello(c->key, sp ? sp + 1 : "", clientIp(c->client))) {
         case WebSessionAuth::OK:   grantClient(idx); return;
         case WebSessionAuth::WAIT: c->waiting = true; reply = "WAIT"; break;
         case WebSessionAuth::BUSY: reply = "ERR the device is answering another browser; enter the code instead"; break;
@@ -792,6 +858,7 @@ bool WebSocketCompanionServer::servePage(int idx) {
 
   const bool term = g_web_mirror.terminalOn();
   const bool screen = g_web_mirror.enabled();
+  const bool settings = CAP_WEB_CONSOLE_SETTINGS && term;   // not on every board (device_caps.h)
 #if WADA_WEB_FILE_TRANSFER
   const bool files = term || g_web_file_transfer.enabled();
 #else
@@ -803,10 +870,12 @@ bool WebSocketCompanionServer::servePage(int idx) {
     { "/mesh",       WC_MESH_GZ,   WC_MESH_GZ_LEN },
     { "/screen",     WC_SCREEN_GZ, WC_SCREEN_GZ_LEN },
     { "/files",      WC_FILES_GZ,  WC_FILES_GZ_LEN },
+#if CAP_WEB_CONSOLE_SETTINGS
     { "/settings",   WC_SETTINGS_GZ, WC_SETTINGS_GZ_LEN },
     { "/dashboard",  WC_DASHBOARD_GZ, WC_DASHBOARD_GZ_LEN },
+#endif
   };
-  const bool on[] = { term || screen || files, term || screen || files, term, screen, files, term, term };
+  const bool on[] = { term || screen || files, term || screen || files, term, screen, files, settings, settings };
 
   char hdr[400];
   for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
@@ -831,8 +900,15 @@ bool WebSocketCompanionServer::servePage(int idx) {
       "frame-ancestors 'self'\r\n"
       "X-Content-Type-Options: nosniff\r\n"
       "Connection: close\r\n\r\n", (unsigned)pages[i].len);
-    if (writeAllBytes(*cl, reinterpret_cast<const uint8_t*>(hdr), (size_t)n, TCP_WRITE_TIMEOUT_MS))
-      writeAllBytes(*cl, pages[i].gz, pages[i].len, WS_PAGE_WRITE_TIMEOUT_MS);
+    // The headers fit one probed write; the body is queued for drainPage, which pushes
+    // only what the socket takes now. A blocking write here held the main loop for as
+    // long as the browser took to ACK (#854 review: up to 1.5 s per page).
+    if (writeAllBytes(*cl, reinterpret_cast<const uint8_t*>(hdr), (size_t)n, TCP_WRITE_TIMEOUT_MS)) {
+      c->page_ptr = pages[i].gz;
+      c->page_len = (uint32_t)pages[i].len;
+      c->page_sent = 0;
+      c->page_ms = millis();
+    }
     return true;
   }
 
@@ -841,21 +917,28 @@ bool WebSocketCompanionServer::servePage(int idx) {
   if (strcmp(path, "/api/info") == 0) {
     status = 200;
     snprintf(body, sizeof body, "{\"dashboard\":%s,\"mesh\":%s,\"screen\":%s,\"files\":%s,\"settings\":%s}",
-             term ? "true" : "false", term ? "true" : "false", screen ? "true" : "false",
-             files ? "true" : "false", term ? "true" : "false");
+             settings ? "true" : "false", term ? "true" : "false", screen ? "true" : "false",
+             files ? "true" : "false", settings ? "true" : "false");
   }
 #if WADA_WEB_FILE_TRANSFER
   // Files tab: start File Transfer for an approved browser (the device would otherwise
   // need its own File Transfer page opened first). Its socket is refused until then, so
   // this is also where a Files-only page asks for approval (202 = waiting; poll again)
   // or uses the code. Query: id=<32 hex>&l=<label>[&code=nnnnnn].
+  // Only the console's own page may call it: it sends X-Wada-Console, which a page on
+  // another site cannot add without a CORS preflight (refused here), and a cross-origin
+  // Origin is refused outright. A plain GET from elsewhere (an <img>, a no-cors fetch)
+  // carries neither header and so cannot raise an approval card.
   else if (strcmp(path, "/api/files") == 0) {
     char id[33] = "", label[24] = "", code[7] = "";
     queryParam(query, "id", id, sizeof id);
     queryParam(query, "l", label, sizeof label);
     queryParam(query, "code", code, sizeof code);
     uint8_t key[16];
+    size_t xl = 0;
     if (!term) status = 404;
+    else if (crossOrigin(c->handshake_buf) || !httpHeader(c->handshake_buf, "X-Wada-Console", &xl))
+      status = 403;
     else if (!consoleKey(id, strlen(id), key)) status = 403;
     else if (code[0]) {
       const bool allowed = g_web_auth.allowed();
@@ -868,7 +951,7 @@ bool WebSocketCompanionServer::servePage(int idx) {
         status = 403;
       }
     } else {
-      switch (g_web_session.hello(key, label)) {
+      switch (g_web_session.hello(key, label, clientIp(c->client))) {
         case WebSessionAuth::OK:   status = 200; break;
         case WebSessionAuth::WAIT: status = 202; break;
         default:                   status = 403; break;
@@ -890,6 +973,29 @@ bool WebSocketCompanionServer::servePage(int idx) {
     (unsigned)strlen(body), body);
   writeAllBytes(*cl, reinterpret_cast<const uint8_t*>(hdr), (size_t)n, TCP_WRITE_TIMEOUT_MS);
   return status == 200;
+}
+
+// Push the rest of a console page from flash as far as the socket takes it right now,
+// one segment per probed write, from the main loop (pollRecvFrame -> doHandshake). The
+// slot is freed once the body has left, the peer has gone, or WS_PAGE_SEND_MS is up.
+void WebSocketCompanionServer::drainPage(int idx) {
+  WSClientState* c = &_clients[idx];
+  while (c->page_sent < c->page_len && c->client.connected() && socketWritableNow(c->client)) {
+    size_t chunk = c->page_len - c->page_sent;
+    if (chunk > WS_PAGE_CHUNK) chunk = WS_PAGE_CHUNK;
+    const size_t n = c->client.write(c->page_ptr + c->page_sent, chunk);
+    if (n == 0) break;
+    c->page_sent += (uint32_t)n;
+#if defined(HAS_TDISPLAY_P4)
+    break;   // AT transport: each write is a worker round-trip; one per pass (as drainClientTx)
+#endif
+  }
+  if (c->page_sent >= c->page_len || !c->client.connected() ||
+      (uint32_t)(millis() - c->page_ms) > WS_PAGE_SEND_MS) {
+    c->page_ptr = nullptr;
+    c->client.stop();
+    c->in_use = false;
+  }
 }
 
 // Read masked WebSocket binary frames from a mirror client and dispatch pointer
