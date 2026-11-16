@@ -765,6 +765,16 @@ static void wcStageClear() { s_wcs_n = 0; s_wcs_an = 0; }
 static void wcaCatsJson(WcOut& o);
 #endif
 
+static void wcCatJson(WcOut& o, int c) {
+  char val[96];
+  settingsCatValue(c, val, sizeof val);
+  o.p += snprintf(o.p, (size_t)(o.e - o.p), "{\"id\":%d", c);
+  o.str("l", TR(kSettingsCats[c].label));
+  o.str("e", kSettingsCats[c].label);
+  if (val[0]) o.str("v", val);
+  o.raw("}");
+}
+
 static void wcCats() {
   WcOut o;
   o.begin("cats");
@@ -783,16 +793,11 @@ static void wcCats() {
       if (!settingsCatOnBoard(c)) continue;
 #if CAP_LUA_APPS
       if (c == CAT_MQTT && (touchPrefsGetAppHide() & APPHIDE_MQTT)) continue;
+      if (c == CAT_APPPERMS) continue;   // the web lists it under Apps (wcaCatsJson)
 #endif
-      char val[96];
-      settingsCatValue(c, val, sizeof val);
       if (!first) o.raw(",");
       first = false;
-      o.p += snprintf(o.p, (size_t)(o.e - o.p), "{\"id\":%d", c);
-      o.str("l", TR(kSettingsCats[c].label));
-      o.str("e", kSettingsCats[c].label);
-      if (val[0]) o.str("v", val);
-      o.raw("}");
+      wcCatJson(o, c);
     }
     o.raw("]}");
   }
@@ -993,12 +998,15 @@ static bool wcaSavPut(const char* id, const char* key, const char* val, bool tex
   return ok;
 }
 
+// The web's Apps section: App permissions, then a page per installed app with settings.
 static void wcaCatsJson(WcOut& o) {
   wcaApps();
-  if (!s_wca_n) return;
+  const bool perms = settingsCatOnBoard(CAT_APPPERMS);
+  if (!perms && !s_wca_n) return;
   o.raw(",{\"t\":\""); jsonEsc(o.p, o.e, TR("Apps")); o.raw("\",\"c\":[");
+  if (perms) wcCatJson(o, CAT_APPPERMS);
   for (int i = 0; i < s_wca_n; ++i) {
-    if (i) o.raw(",");
+    if (i || perms) o.raw(",");
     o.raw("{\"id\":\"a:"); jsonEsc(o.p, o.e, s_wca[i].id); o.raw("\"");
     o.str("l", s_wca[i].name);
     o.str("e", "apps");
