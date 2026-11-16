@@ -999,8 +999,10 @@ static bool wcaSavPut(const char* id, const char* key, const char* val, bool tex
 }
 
 // The web's Apps section: App permissions, then a page per installed app with settings.
+// Re-reads the manifests on every category list: a manifest replaced without a Store
+// rescan (USB Files, a card reader) must not leave its old config list cached.
 static void wcaCatsJson(WcOut& o) {
-  wcaApps();
+  if (wcaEnsure()) wcaScan(); else s_wca_n = 0;
   const bool perms = settingsCatOnBoard(CAT_APPPERMS);
   if (!perms && !s_wca_n) return;
   o.raw(",{\"t\":\""); jsonEsc(o.p, o.e, TR("Apps")); o.raw("\",\"c\":[");
